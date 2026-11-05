@@ -1,0 +1,18 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: crop_supply
+      POSTGRES_USER: cropapp
+      POSTGRES_PASSWORD: cropapp
+    ports:
+      - "5432:5432"
+    volumes:
+      - crop_supply_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cropapp -d crop_supply"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+volumes:
+  crop_supply_data:
