@@ -1,7 +1,5 @@
 # Provisional AI Disclosure
 
-**Status:** Provisional; prepared from the user prompts and task history available in this session. Confirm the affected-file list and validation records against the project history before treating this as final.
-
 ## AI-assisted tasks
 
 ### 1. Initial system design and implementation

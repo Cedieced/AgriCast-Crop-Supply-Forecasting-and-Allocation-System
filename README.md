@@ -1,6 +1,10 @@
 # AgriCast — Crop Supply Forecasting and Allocation System
 
+<<<<<<< HEAD
 An MVP for the Municipal Agriculture Office of Boac, Marinduque. The workspace contains a React dashboard, an Express/MySQL API, and a Flutter field-app foundation designed for offline data capture.
+=======
+An MVP for the Municipal Agriculture Office of Boac, Marinduque. The workspace contains a React dashboard, an Express/MySql API, and a Flutter field-app foundation designed for offline data capture.
+>>>>>>> 24f24742e04ba26c61b5047a33e9b6802ab6fe09
 
 ## Project layout
 
