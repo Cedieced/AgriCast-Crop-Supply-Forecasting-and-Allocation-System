@@ -13,8 +13,8 @@ FROM crop_types;
 
 INSERT IGNORE INTO barangays (municipality_id, name, latitude, longitude, population)
 SELECT m.id, b.name,
-  13.43 + MOD(b.ordinality - 1, 9) * 0.008,
-  121.82 + FLOOR((b.ordinality - 1) / 9) * 0.010,
+  NULL,
+  NULL,
   950 + MOD(b.ordinality * 317, 1700)
 FROM municipalities m
 CROSS JOIN (
@@ -92,3 +92,13 @@ SELECT municipality.id, crop.id,
   DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY),
   municipality.population * crop.per_capita_kg_year / 52.0
 FROM municipalities municipality CROSS JOIN crop_types crop;
+
+UPDATE barangays b
+JOIN municipalities m ON m.id = b.municipality_id
+SET b.latitude = NULL, b.longitude = NULL
+WHERE m.name = 'Boac';
+
+UPDATE field_reports r
+JOIN farmers f ON f.id = r.farmer_id
+SET r.latitude = NULL, r.longitude = NULL
+WHERE f.name LIKE 'Sample Farmer %';

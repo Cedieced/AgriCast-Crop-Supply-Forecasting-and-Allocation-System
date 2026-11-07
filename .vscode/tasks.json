@@ -1,0 +1,61 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Start AgriCast API",
+            "type": "shell",
+            "command": "npm.cmd",
+            "args": [
+                "run",
+                "dev"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}\\backend"
+            },
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "custom",
+                "pattern": {
+                    "regexp": "^$"
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^> .* dev$",
+                    "endsPattern": "^Crop Supply API listening on http://localhost:4000$"
+                }
+            }
+        },
+        {
+            "label": "Start AgriCast Web",
+            "type": "shell",
+            "command": "npm.cmd",
+            "args": [
+                "run",
+                "dev"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}\\frontend"
+            },
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "custom",
+                "pattern": {
+                    "regexp": "^$"
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^> .* dev$",
+                    "endsPattern": "^\\s*.*Local:\\s+http://localhost:5173/$"
+                }
+            }
+        },
+        {
+            "label": "Start AgriCast Services",
+            "dependsOn": [
+                "Start AgriCast API",
+                "Start AgriCast Web"
+            ],
+            "dependsOrder": "parallel"
+        }
+    ]
+}

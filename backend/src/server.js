@@ -29,9 +29,44 @@ app.use(helmet());
 app.use(cors({
   origin: (process.env.WEB_ORIGIN || "http://localhost:5173,http://localhost:5174,http://127.0.0.1:5174").split(",").map((origin) => origin.trim()),
 }));
+
+app.use((req, res, next) => {
+  const requestId = randomUUID();
+  res.locals.requestId = requestId;
+  res.setHeader("X-Request-Id", requestId);
+  res.on("finish", () => {
+    if (res.statusCode >= 400) {
+      console.warn(JSON.stringify({
+        event: "api_request_failed",
+        requestId,
+        method: req.method,
+        path: req.path,
+        status: res.statusCode,
+      }));
+    }
+  });
+  next();
+});
+
 app.use(express.json({ limit: "1mb" }));
 
-app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
+app.get("/api/health", async (_req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({ status: "ok", database: "ok" });
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: "database_health_check_failed",
+      requestId: res.locals.requestId,
+      code: error.code || null,
+    }));
+    res.status(503).json({
+      status: "error",
+      database: "unavailable",
+      requestId: res.locals.requestId,
+    });
+  }
+});
 
 app.get("/api/events", requireAuth, (req, res) => {
   res.status(200).set({
@@ -423,9 +458,8 @@ app.get("/api/forecasts", requireAuth, async (req, res, next) => {
   }
 });
 
-app.get("/api/recommendations", requireAuth, async (_req, res, next) => {
-  try {
-    const boac = await pool.query(
+async function generateSupplyRecommendations(client) {
+    const boac = await client.query(
       `SELECT c.id AS crop_type_id, c.name AS crop_name,
         c.per_capita_kg_year * m.population / 52.0 AS weekly_demand_kg,
         COALESCE(SUM(r.area_ha * c.average_yield_kg_ha),0) AS expected_supply_kg,
@@ -440,7 +474,7 @@ app.get("/api/recommendations", requireAuth, async (_req, res, next) => {
        WHERE m.name = 'Boac'
        GROUP BY c.id, c.name, c.per_capita_kg_year, m.population, m.id`,
     );
-    const destinations = await pool.query(
+    const destinations = await client.query(
       `SELECT municipality.id AS municipality_id, municipality.name,
         crop.id AS crop_type_id,
         GREATEST(municipality.population * crop.per_capita_kg_year / 52.0 - COALESCE(SUM(report.area_ha * crop.average_yield_kg_ha),0), 0) AS remaining_demand_kg
@@ -461,7 +495,7 @@ app.get("/api/recommendations", requireAuth, async (_req, res, next) => {
       if (!crop.source_barangay_id || totalSurplus === 0) continue;
       const plan = allocationPlan(totalSurplus, destinationByCrop.get(crop.crop_type_id) || []);
       for (const neighbor of plan) {
-        await pool.query(
+        await client.query(
           `INSERT INTO recommendations (crop_type_id, source_barangay_id, target_municipality_id, surplus_kg, recommended_kg)
            VALUES (?,?,?,?,?)
            ON DUPLICATE KEY UPDATE
@@ -471,6 +505,34 @@ app.get("/api/recommendations", requireAuth, async (_req, res, next) => {
         );
       }
     }
+    const { rows } = await client.query(
+      `SELECT rec.*, c.name AS crop_name, b.name AS source_barangay, target.name AS target_municipality
+       FROM recommendations rec JOIN crop_types c ON c.id = rec.crop_type_id
+       JOIN barangays b ON b.id = rec.source_barangay_id
+       JOIN municipalities target ON target.id = rec.target_municipality_id ORDER BY rec.created_at DESC`,
+    );
+    return rows;
+}
+
+app.post("/api/recommendations/generate", requireAuth, allowRoles(...officerRoles), async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET @app_user_id = ?", [req.user.sub]);
+    await client.query("DELETE FROM recommendations WHERE status = 'proposed'");
+    const rows = await generateSupplyRecommendations(client);
+    await client.query("COMMIT");
+    res.json(rows);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    next(error);
+  } finally {
+    await releaseClient(client);
+  }
+});
+
+app.get("/api/recommendations", requireAuth, async (_req, res, next) => {
+  try {
     const { rows } = await pool.query(
       `SELECT rec.*, c.name AS crop_name, b.name AS source_barangay, target.name AS target_municipality
        FROM recommendations rec JOIN crop_types c ON c.id = rec.crop_type_id
@@ -538,9 +600,31 @@ app.get("/api/summary", requireAuth, async (_req, res, next) => {
   }
 });
 
-app.use((error, _req, res, _next) => {
-  console.error(error);
-  res.status(500).json({ error: "An unexpected server error occurred" });
+app.use((error, req, res, _next) => {
+  const status = error.type === "entity.parse.failed"
+    ? 400
+    : error.type === "entity.too.large"
+      ? 413
+      : Number.isInteger(error.status) && error.status >= 400 && error.status < 500
+        ? error.status
+        : 500;
+  console.error(JSON.stringify({
+    event: "api_error",
+    requestId: res.locals.requestId,
+    method: req.method,
+    path: req.path,
+    status,
+    code: error.code || null,
+    message: error.message,
+  }));
+  const message = error.type === "entity.parse.failed"
+    ? "Request body must be valid JSON"
+    : error.type === "entity.too.large"
+      ? "Request body is too large"
+      : status < 500
+        ? "Invalid request"
+        : "An unexpected server error occurred";
+  res.status(status).json({ error: message, requestId: res.locals.requestId });
 });
 
 async function start() {
@@ -562,7 +646,7 @@ async function start() {
   await seedDatabase();
   await generateHarvestAlerts();
   setInterval(() => generateHarvestAlerts().catch((error) => console.error("Harvest alert generation failed:", error)), 60 * 60 * 1000).unref();
-  app.listen(port, () => console.log(`Crop Supply API listening on http://localhost:${port}`));
+  app.listen(port, "0.0.0.0", () => console.log(`Crop Supply API listening on http://localhost:${port}`));
 }
 
 async function generateHarvestAlerts() {

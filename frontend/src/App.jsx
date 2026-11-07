@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity, ArrowDownRight, ArrowUpRight, BarChart3, Bell, Boxes, Check, ChevronDown, ChevronRight,
   CircleHelp, ClipboardCheck, Cloud, Download, FileSpreadsheet, FileText, Filter, LayoutDashboard,
@@ -9,6 +9,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { api, subscribeToUpdates } from "./api.js";
 import { barangays, crops, forecastRows, initialReports, notifications as demoNotifications } from "./data.js";
+import { getBoundaryName, normalizeBarangayName, pointInBarangayBoundary, representativePointInBoundary } from "./map-geometry.js";
 
 const navigation = [
   { section: "OVERVIEW", items: [["Dashboard", LayoutDashboard], ["Map view", MapIcon]] },
@@ -74,27 +75,79 @@ function riskForForecast(row) {
   return "yellow";
 }
 
-function MapPanel({ onSelect, selected, compact = false, forecasts = [] }) {
+function MapPanel({ onSelect, selected, compact = false, forecasts = [], locations = [], boundaries = [], reports = [], debug = false }) {
   const mapId = compact ? "dashboard-map" : "full-map";
   useEffect(() => {
     const node = document.getElementById(mapId);
     if (!node || node._leaflet_id) return;
-    const map = L.map(node, { zoomControl: true, scrollWheelZoom: false }).setView([13.445, 121.83], compact ? 12 : 12);
+    const map = L.map(node, { zoomControl: true, scrollWheelZoom: false }).setView([13.445, 121.83], 12);
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
       maxZoom: 18,
     }).addTo(map);
-    barangays.forEach((name, index) => {
-      const position = [13.43 + (index % 9) * 0.008, 121.82 + Math.floor(index / 9) * 0.01];
-      const rows = forecasts.filter((item) => (item.barangay_name || item.barangay) === name);
+    const boundaryByName = new Map();
+    const boundaryLayer = L.geoJSON(boundaries, {
+      style: { color: "#34764a", weight: 1.5, fillColor: "#69a875", fillOpacity: 0.12 },
+      onEachFeature: (feature, layer) => {
+        const name = getBoundaryName(feature);
+        if (name) {
+          boundaryByName.set(normalizeBarangayName(name), feature);
+          layer.bindTooltip(name);
+        }
+      },
+    }).addTo(map);
+    if (boundaryLayer.getLayers().length && !compact) {
+      map.fitBounds(boundaryLayer.getBounds(), { padding: [12, 12] });
+    }
+    if (debug) L.control.scale({ imperial: false }).addTo(map);
+    for (const location of boundaries.length ? locations : []) {
+      const name = location.name;
+      const boundary = boundaryByName.get(normalizeBarangayName(name));
+      if (!boundary) {
+        console.error(`Skipping ${name}: no matching barangay boundary is loaded.`);
+        continue;
+      }
+      let latitude = Number(location.latitude);
+      let longitude = Number(location.longitude);
+      let coordinateSource = "stored";
+      const hasStoredCoordinates = location.latitude != null && location.longitude != null &&
+        location.latitude !== "" && location.longitude !== "";
+      const validCoordinates = hasStoredCoordinates && Number.isFinite(latitude) &&
+        Number.isFinite(longitude) && latitude >= -90 && latitude <= 90 &&
+        longitude >= -180 && longitude <= 180;
+      const contained = validCoordinates &&
+        pointInBarangayBoundary(latitude, longitude, boundary.geometry);
+      if (hasStoredCoordinates && !contained) {
+        console.error(`Replacing ${name}: stored coordinates are invalid or outside its barangay boundary.`, { latitude, longitude });
+      }
+      if (!contained) {
+        const representative = representativePointInBoundary(boundary.geometry);
+        if (!representative) {
+          console.error(`Skipping ${name}: no interior point could be calculated for its barangay boundary.`);
+          continue;
+        }
+        [latitude, longitude] = representative;
+        coordinateSource = "generated representative point";
+      }
+      if (!pointInBarangayBoundary(latitude, longitude, boundary.geometry)) {
+        console.error(`Skipping ${name}: validated coordinates are outside its barangay boundary.`, { latitude, longitude });
+        continue;
+      }
+      const rows = forecasts.filter((item) => item.barangay_name === name);
       const order = { red: 0, yellow: 1, green: 2 };
-      const risk = rows.map(riskForForecast).sort((a, b) => order[a] - order[b])[0] || (index % 5 === 3 ? "yellow" : "green");
+      const risk = rows.map(riskForForecast).sort((a, b) => order[a] - order[b])[0] || "green";
       const icon = L.divIcon({ className: "map-marker-wrap", html: `<span class="map-marker marker-${risk}"></span>`, iconSize: [15, 15], iconAnchor: [7, 7] });
-      L.marker(position, { icon }).addTo(map).bindTooltip(name, { direction: "top", offset: [0, -6] }).on("click", () => onSelect(name));
-    });
+      const marker = L.marker([latitude, longitude], { icon }).addTo(map);
+      marker.bindTooltip(debug ? `${name} · ${latitude.toFixed(5)}, ${longitude.toFixed(5)} · contained · ${coordinateSource}` : name, { direction: "top", offset: [0, -6] });
+      marker.on("click", () => onSelect(name));
+      if (debug) {
+        const reportCount = reports.filter((report) => report.barangay === name).length;
+        marker.bindPopup(`<strong>${name}</strong><br>Assignment: ${name}<br>Coordinates: ${latitude.toFixed(6)}, ${longitude.toFixed(6)}<br>Location source: ${coordinateSource}<br>Boundary validation: passed<br>Reports: ${reportCount}`);
+      }
+    }
     map.whenReady(() => window.setTimeout(() => map.invalidateSize(), 100));
     return () => map.remove();
-  }, [mapId, onSelect, forecasts]);
+  }, [mapId, onSelect, forecasts, locations, boundaries, reports, compact, debug]);
   return <div className={`map-canvas ${compact ? "map-compact" : ""}`} id={mapId} aria-label={`Map of Boac barangays${selected ? `, selected ${selected}` : ""}`} />;
 }
 
@@ -111,7 +164,7 @@ function MiniBars() {
   </div>;
 }
 
-function DashboardHome({ reports, forecasts, selectedBarangay, setSelectedBarangay, setPage }) {
+function DashboardHome({ reports, forecasts, locations, boundaries, selectedBarangay, setSelectedBarangay, setPage }) {
   const pending = reports.filter((report) => report.status === "submitted").length;
   const approved = reports.filter((report) => report.status === "approved");
   const hectares = approved.reduce((sum, report) => sum + Number(report.area || 0), 0);
@@ -127,7 +180,7 @@ function DashboardHome({ reports, forecasts, selectedBarangay, setSelectedBarang
     </section>
     <section className="overview-grid">
       <article className="panel harvest-panel"><div className="panel-heading"><div><h2>Harvest outlook</h2><p className="muted">Projected crop volume · this season</p></div><button className="select-button">All crops <ChevronDown size={14} /></button></div><div className="chart-legend"><span><i className="legend-dot green-dot" /> Forecast harvest</span><span><i className="legend-line" /> Market demand</span><b>Nov 2026</b></div><MiniBars /><div className="chart-caption">Supply is tracking <strong>14% above</strong> seasonal demand <span>+5,840 kg vs target</span></div></article>
-      <article className="panel map-panel"><div className="panel-heading"><div><h2>Production by barangay</h2><p className="muted">Live crop activity across Boac</p></div><button className="icon-button" aria-label="Open full map" onClick={() => setPage("Map view")}><ArrowUpRight size={17} /></button></div><MapPanel compact forecasts={forecasts} onSelect={setSelectedBarangay} selected={selectedBarangay} /><div className="map-legend"><span><i className="legend-dot green-dot" /> Demand met</span><span><i className="legend-dot yellow-dot" /> Watch</span><span><i className="legend-dot red-dot" /> Significant risk</span><button onClick={() => setPage("Map view")}>Explore map <ChevronRight size={13} /></button></div></article>
+      <article className="panel map-panel"><div className="panel-heading"><div><h2>Production by barangay</h2><p className="muted">Live crop activity across Boac</p></div><button className="icon-button" aria-label="Open full map" onClick={() => setPage("Map view")}><ArrowUpRight size={17} /></button></div><MapPanel compact forecasts={forecasts} reports={reports} locations={locations} boundaries={boundaries} onSelect={setSelectedBarangay} selected={selectedBarangay} /><div className="map-legend"><span><i className="legend-dot green-dot" /> Demand met</span><span><i className="legend-dot yellow-dot" /> Watch</span><span><i className="legend-dot red-dot" /> Significant risk</span><small>{boundaries.length ? "Markers are shown only inside their matched barangay boundary." : "Map markers hidden until verified barangay boundaries are installed."}</small><button onClick={() => setPage("Map view")}>Explore map <ChevronRight size={13} /></button></div></article>
     </section>
     <section className="overview-grid bottom-grid">
       <article className="panel table-panel"><div className="panel-heading"><div><h2>Upcoming harvests</h2><p className="muted">Next expected harvest windows</p></div><button className="subtle-link" onClick={() => setPage("Forecasting")}>View forecast <ChevronRight size={14} /></button></div><div className="table-scroll"><table><thead><tr><th>BARANGAY / CROP</th><th>HARVEST WINDOW</th><th>VOLUME</th><th>RISK</th></tr></thead><tbody>{upcoming.map((r) => <tr key={r.id}><td><strong>{r.barangay}</strong><small>{r.crop}</small></td><td>{r.harvest}</td><td>{formatNumber(r.volume)} kg</td><td><StatusBadge status={r.volume > 7000 ? "oversupply" : "balanced"} /></td></tr>)}</tbody></table></div></article>
@@ -136,16 +189,22 @@ function DashboardHome({ reports, forecasts, selectedBarangay, setSelectedBarang
   </div>;
 }
 
-function ReportsPage({ reports, crops: cropCatalog, onReview, onNew, onExport, apiOnline }) {
+function ReportsPage({ reports, crops: cropCatalog, onReview, onNew, onExport, apiOnline, searchQuery = "" }) {
   const [filter, setFilter] = useState("all");
-  const visible = reports.filter((report) => filter === "all" || report.status === filter);
+  const visible = reports.filter((report) => {
+    const matchesStatus = filter === "all" || report.status === filter;
+    const searchText = [
+      report.displayId, report.id, report.farmer, report.barangay, report.crop, report.status,
+    ].join(" ").toLowerCase();
+    return matchesStatus && (!searchQuery || searchText.includes(searchQuery.toLowerCase()));
+  });
   return <div className="page-content">
     <div className="page-heading"><div><p className="eyebrow">OPERATIONS</p><h1>Field reports</h1><p className="muted">Review submissions and keep crop production records up to date.</p></div><button className="button button-primary" onClick={onNew}><Plus size={16} /> New report</button></div>
     {!apiOnline && <div className="info-banner"><Cloud size={16} /> Demo data is stored in this browser session. Connect the API to save submissions centrally.</div>}
     <section className="metric-grid compact-metrics"><MetricCard label="Total reports" value={reports.length} unit="" change="+8 this month" icon={FileText} tone="blue" /><MetricCard label="Awaiting review" value={reports.filter((r) => r.status === "submitted").length} unit="" change="needs attention" icon={ClipboardCheck} tone="orange" /><MetricCard label="Approved" value={reports.filter((r) => r.status === "approved").length} unit="" change="+5 this month" icon={Check} tone="green" /></section>
     <article className="panel full-panel"><div className="panel-heading"><div className="tab-buttons">{["all", "submitted", "approved", "rejected"].map((item) => <button key={item} className={filter === item ? "tab-active" : ""} onClick={() => setFilter(item)}>{item === "all" ? "All reports" : item === "submitted" ? "For review" : item[0].toUpperCase() + item.slice(1)}{item === "submitted" && <span>{reports.filter((r) => r.status === "submitted").length}</span>}</button>)}</div><div className="table-tools"><button className="button button-light" onClick={() => onExport("excel")}><Download size={15} /> Export</button><button className="icon-button"><Filter size={16} /></button></div></div>
       <div className="table-scroll"><table><thead><tr><th>REPORT / FARMER</th><th>BARANGAY</th><th>CROP</th><th>AREA</th><th>EXPECTED HARVEST</th><th>STATUS</th><th>ACTION</th></tr></thead><tbody>{visible.map((r) => <tr key={r.id}><td><strong>{r.displayId || r.id}</strong><small>{r.farmer}</small></td><td>{r.barangay}</td><td><span className="crop-cell"><i style={{ background: cropCatalog.find((crop) => crop.name === r.crop)?.color || "#39834c" }} />{r.crop}</span></td><td>{Number(r.area).toFixed(1)} ha</td><td><strong>{formatNumber(r.volume)} kg</strong><small>{r.harvest}</small></td><td><StatusBadge status={r.status} /></td><td>{r.status === "submitted" ? <div className="row-actions"><button title="Approve" className="action-check" onClick={() => onReview(r, "approved")}><Check size={16} /></button><button title="Reject" className="action-reject" onClick={() => onReview(r, "rejected")}><X size={16} /></button></div> : <button className="subtle-link">Details <ChevronRight size={13} /></button>}</td></tr>)}</tbody></table></div>
-      {!visible.length && <div className="empty-state">No reports in this category yet.</div>}
+      {!visible.length && <div className="empty-state">{searchQuery ? `No reports match “${searchQuery}”.` : "No reports in this category yet."}</div>}
     </article>
   </div>;
 }
@@ -163,7 +222,7 @@ function ForecastPage({ forecasts, onExport }) {
   </div>;
 }
 
-function MapPage({ selected, setSelected, forecasts }) {
+function MapPage({ selected, setSelected, forecasts, locations, boundaries, boundaryStatus, reloadBoundaries, reports }) {
   const row = (forecasts?.length ? forecasts : forecastRows())
     .filter((item) => (item.barangay_name || item.barangay) === selected)
     .sort((a, b) => Number(b.expected_harvest_kg ?? b.supply ?? 0) - Number(a.expected_harvest_kg ?? a.supply ?? 0))[0];
@@ -172,28 +231,45 @@ function MapPage({ selected, setSelected, forecasts }) {
   const projectedDifference = expectedSupply - localDemand;
   return <div className="page-content">
     <div className="page-heading"><div><p className="eyebrow">GEOGRAPHIC INTELLIGENCE</p><h1>Boac crop map</h1><p className="muted">Explore farm activity and crop supply outlook by barangay.</p></div><div className="map-date-chip"><span className="online-dot" /> 61 barangays <span>·</span> Live overview</div></div>
-    <div className="map-layout"><article className="panel map-main"><MapPanel forecasts={forecasts} onSelect={setSelected} selected={selected} /><div className="map-legend map-legend-full"><span><i className="legend-dot green-dot" /> Demand met</span><span><i className="legend-dot yellow-dot" /> Potential imbalance</span><span><i className="legend-dot red-dot" /> Significant risk</span><small>Illustrative barangay markers · verify locations against official GIS data</small></div></article>
+    {!boundaries.length && boundaryStatus === "loading" && <div className="info-banner" role="status">Loading the Boac barangay boundary layer...</div>}
+    {!boundaries.length && boundaryStatus !== "loading" && <div className="info-banner" role="status">No verified Boac barangay boundary layer is installed. Map nodes are hidden to avoid misleading placement. Add the official GeoJSON at <code>/data/boac-barangay-boundaries.geojson</code> and reload the layer.</div>}
+    {boundaryStatus === "error" && <div className="error-box" role="alert">The barangay boundary GeoJSON could not be loaded or is invalid.</div>}
+    <div className="map-layout"><article className="panel map-main"><MapPanel forecasts={forecasts} locations={locations} boundaries={boundaries} reports={reports} debug={import.meta.env.DEV && new URLSearchParams(window.location.search).has("mapDebug")} onSelect={setSelected} selected={selected} /><div className="map-legend map-legend-full"><span><i className="legend-dot green-dot" /> Demand met</span><span><i className="legend-dot yellow-dot" /> Potential imbalance</span><span><i className="legend-dot red-dot" /> Significant risk</span><small>{boundaries.length ? "Markers are containment-checked; generated representative points are barangay visualization locations, not farm GPS." : "No markers are rendered without barangay polygons and contained coordinates."}</small><button className="subtle-link" onClick={reloadBoundaries}>Reload GIS layer</button></div></article>
       <aside className="panel barangay-details"><p className="eyebrow">SELECTED BARANGAY</p><h2>{selected}</h2><p className="muted">Boac Municipality · Marinduque</p><div className="detail-crop"><span className="crop-avatar">🌾</span><span><strong>{row?.crop_name || row?.crop || "Rice"}</strong><small>Primary forecast crop</small></span><StatusBadge status={row?.supply_status || row?.status || "oversupply"} /></div><div className="detail-stat"><span>Risk status</span><StatusBadge status={row ? riskForForecast(row) : "yellow"} /></div><div className="detail-stat"><span>Total planted area</span><strong>{Number(row?.total_area_ha ?? row?.area ?? 8.4).toFixed(1)} ha</strong></div><div className="detail-stat"><span>Expected harvest</span><strong>{formatNumber(expectedSupply)} kg</strong></div><div className="detail-stat"><span>Weekly market capacity</span><strong>{formatNumber(localDemand)} kg</strong></div><div className="detail-stat"><span>Projected {projectedDifference >= 0 ? "oversupply" : "shortage"}</span><strong>{formatNumber(Math.abs(projectedDifference))} kg</strong></div><div className="detail-stat"><span>Harvest period</span><strong>{row?.harvest || "Jul 18 – Aug 02"}</strong></div><div className="risk-note"><AlertTriangle size={16} /><span><strong>Supply forecast: {row?.supply_status || row?.status || "oversupply"}</strong><small>Recommendations account for projected supply and neighboring demand.</small></span></div><button className="button button-primary full-button">View barangay reports <ChevronRight size={15} /></button></aside>
     </div>
   </div>;
 }
 
 function AllocationPage({ token }) {
-  const [recommendations, setRecommendations] = useState([
-    { crop: "Tomato", source: "Laylay, Boac", target: "Gasan", surplus: 5000, recommend: 3000, status: "proposed", color: "tomato" },
-    { crop: "Rice", source: "Agumaymayan, Boac", target: "Mogpog", surplus: 6400, recommend: 4200, status: "proposed", color: "rice" },
-    { crop: "Corn", source: "Caganhao, Boac", target: "Buenavista", surplus: 2800, recommend: 1800, status: "accepted", color: "corn" },
-  ]);
+  const [recommendations, setRecommendations] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const mapRecommendations = (items) => items.map((item) => ({
+    id: item.id, crop: item.crop_name, source: `${item.source_barangay}, Boac`, target: item.target_municipality,
+    surplus: Number(item.surplus_kg), recommend: Number(item.recommended_kg), status: item.status,
+    color: item.crop_name.toLowerCase() === "tomato" ? "tomato" : item.crop_name.toLowerCase() === "corn" ? "corn" : "rice",
+  }));
   useEffect(() => {
-    if (!token) return;
+    if (!token) {
+      setLoading(false);
+      setError("Sign in to load and generate recommendations.");
+      return;
+    }
     let active = true;
     const load = () => api("/recommendations", { token }).then((items) => {
-      if (active) setRecommendations(items.map((item) => ({
-        id: item.id, crop: item.crop_name, source: `${item.source_barangay}, Boac`, target: item.target_municipality,
-        surplus: Number(item.surplus_kg), recommend: Number(item.recommended_kg), status: item.status,
-        color: item.crop_name.toLowerCase() === "tomato" ? "tomato" : item.crop_name.toLowerCase() === "corn" ? "corn" : "rice",
-      })));
-    }).catch((error) => console.error("Could not load allocation recommendations:", error));
+      if (active) {
+        setRecommendations(mapRecommendations(items));
+        setError("");
+        setLoading(false);
+      }
+    }).catch((reason) => {
+      if (active) {
+        setError(reason.message);
+        setLoading(false);
+      }
+    });
     window.addEventListener("agricast:data-changed", load);
     load();
     return () => {
@@ -201,6 +277,23 @@ function AllocationPage({ token }) {
       window.removeEventListener("agricast:data-changed", load);
     };
   }, [token]);
+  async function generate() {
+    if (!token || generating) return;
+    setGenerating(true);
+    setError("");
+    setMessage("");
+    try {
+      const items = await api("/recommendations/generate", { token, method: "POST" });
+      setRecommendations(mapRecommendations(items));
+      setMessage(items.length
+        ? `Generated ${items.length} recommendation${items.length === 1 ? "" : "s"} from current approved reports.`
+        : "No recommendations generated. Current approved reports show no surplus available for allocation.");
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setGenerating(false);
+    }
+  }
   async function accept(index) {
     const recommendation = recommendations[index];
     if (token && recommendation.id) {
@@ -211,9 +304,11 @@ function AllocationPage({ token }) {
     setRecommendations((items) => items.map((item, i) => i === index ? { ...item, status: "accepted" } : item));
   }
   return <div className="page-content">
-    <div className="page-heading"><div><p className="eyebrow">PROVINCIAL COORDINATION</p><h1>Supply allocation</h1><p className="muted">Turn local surpluses into reliable supply for neighboring municipalities.</p></div><button className="button button-primary"><Plus size={16} /> Generate recommendations</button></div>
+    <div className="page-heading"><div><p className="eyebrow">PROVINCIAL COORDINATION</p><h1>Supply allocation</h1><p className="muted">Turn local surpluses into reliable supply for neighboring municipalities.</p></div><button className="button button-primary" onClick={generate} disabled={generating || loading || !token}><Plus size={16} /> {generating ? "Generating..." : "Generate recommendations"}</button></div>
+    {error && <div className="error-box" role="alert">{error}</div>}
+    {message && <div className="info-banner" role="status">{message}</div>}
     <section className="allocation-hero"><div className="allocation-illustration"><span className="orbit orbit-one" /><span className="orbit orbit-two" /><span className="allocation-center"><Sprout size={29} /></span><span className="orbit-label label-boac">BOAC<br /><b>+5.0t</b></span><span className="orbit-label label-gasan">GASAN<br /><b>3.0t need</b></span><span className="orbit-label label-mogpog">MOGPOG<br /><b>4.2t need</b></span></div><div className="allocation-copy"><p className="eyebrow">SMART REDISTRIBUTION</p><h2>Move the harvest<br />where it’s needed.</h2><p>Recommendations compare projected municipal supply against weekly demand, then suggest transfer volumes that reduce waste and help close shortages.</p><div className="allocation-stats"><div><strong>12.4t</strong><small>Available surplus</small></div><div><strong>3</strong><small>Municipalities at risk</small></div><div><strong>6</strong><small>Recommendations</small></div></div></div></section>
-    <article className="panel full-panel"><div className="panel-heading"><div><h2>Recommended transfers</h2><p className="muted">Illustrative allocation plan based on current forecast and demand records</p></div><button className="select-button">All municipalities <ChevronDown size={14} /></button></div><div className="table-scroll"><table><thead><tr><th>CROP</th><th>SOURCE</th><th>DESTINATION</th><th>SURPLUS</th><th>RECOMMENDED</th><th>STATUS</th><th>ACTION</th></tr></thead><tbody>{recommendations.map((item, index) => <tr key={item.crop + item.target}><td><span className={`crop-avatar small-avatar ${item.color}`}>{item.crop === "Tomato" ? "●" : item.crop === "Corn" ? "◉" : "▤"}</span><strong>{item.crop}</strong></td><td>{item.source}</td><td><span className="route-cell"><MapPin size={14} />{item.target}, Marinduque</span></td><td>{formatNumber(item.surplus)} kg</td><td><strong>{formatNumber(item.recommend)} kg</strong></td><td><StatusBadge status={item.status === "proposed" ? "submitted" : "approved"} /></td><td>{item.status === "proposed" ? <button className="button button-small" onClick={() => accept(index)}>Accept</button> : <span className="accepted-label"><Check size={14} /> Accepted</span>}</td></tr>)}</tbody></table></div></article>
+    <article className="panel full-panel"><div className="panel-heading"><div><h2>Recommended transfers</h2><p className="muted">Generated from approved crop reports and neighboring municipalities’ remaining demand</p></div><button className="select-button">All municipalities <ChevronDown size={14} /></button></div><div className="table-scroll"><table><thead><tr><th>CROP</th><th>SOURCE</th><th>DESTINATION</th><th>SURPLUS</th><th>RECOMMENDED</th><th>STATUS</th><th>ACTION</th></tr></thead><tbody>{recommendations.map((item, index) => <tr key={item.id}><td><span className={`crop-avatar small-avatar ${item.color}`}>{item.crop === "Tomato" ? "●" : item.crop === "Corn" ? "◉" : "▤"}</span><strong>{item.crop}</strong></td><td>{item.source}</td><td><span className="route-cell"><MapPin size={14} />{item.target}, Marinduque</span></td><td>{formatNumber(item.surplus)} kg</td><td><strong>{formatNumber(item.recommend)} kg</strong></td><td><StatusBadge status={item.status === "proposed" ? "submitted" : item.status === "accepted" ? "approved" : item.status} /></td><td>{item.status === "proposed" ? <button className="button button-small" onClick={() => accept(index)}>Accept</button> : item.status === "accepted" ? <span className="accepted-label"><Check size={14} /> Accepted</span> : item.status}</td></tr>)}</tbody></table></div>{!loading && !recommendations.length && <div className="empty-state">No recommendations yet. Select “Generate recommendations” to calculate transfers from approved crop reports.</div>}{loading && <div className="empty-state">Loading recommendations…</div>}</article>
     <div className="note-banner"><CircleHelp size={17} /><span><strong>How recommendations work</strong> Destination demand is calculated from municipal population × crop per-capita consumption ÷ 52 weeks. Transfer volumes are capped at the destination's remaining projected demand.</span></div>
   </div>;
 }
@@ -307,21 +402,46 @@ function App() {
   const [reports, setReports] = useState(initialReports);
   const [cropCatalog, setCropCatalog] = useState(crops);
   const [forecasts, setForecasts] = useState(forecastRows());
+  const [barangayLocations, setBarangayLocations] = useState([]);
+  const [boundaryFeatures, setBoundaryFeatures] = useState([]);
+  const [boundaryStatus, setBoundaryStatus] = useState("not-loaded");
+  const [boundaryReload, setBoundaryReload] = useState(0);
   const [apiOnline, setApiOnline] = useState(false);
   const [modal, setModal] = useState(false);
   const [selectedBarangay, setSelectedBarangay] = useState("Agumaymayan");
   const [mobileNav, setMobileNav] = useState(false);
   const [search, setSearch] = useState("");
+  const [searchFocused, setSearchFocused] = useState(false);
+  const searchInputRef = useRef(null);
   const setSelected = useMemo(() => (name) => setSelectedBarangay(name), []);
+  const normalizedSearch = search.trim().toLowerCase();
+  const searchResults = useMemo(() => {
+    if (!normalizedSearch) return [];
+    return reports.filter((report) => [
+      report.displayId, report.id, report.farmer, report.barangay, report.crop, report.status,
+    ].some((value) => String(value || "").toLowerCase().includes(normalizedSearch))).slice(0, 6);
+  }, [normalizedSearch, reports]);
+
+  useEffect(() => {
+    function focusSearch(event) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+      }
+    }
+    window.addEventListener("keydown", focusSearch);
+    return () => window.removeEventListener("keydown", focusSearch);
+  }, []);
 
   useEffect(() => {
     if (!token) return;
     let active = true;
     async function refresh() {
-      const [reportData, forecastData, cropData] = await Promise.all([
-        api("/reports", { token }), api("/forecasts", { token }), api("/crops", { token }),
+      const [reportData, forecastData, cropData, barangayData] = await Promise.all([
+        api("/reports", { token }), api("/forecasts", { token }), api("/crops", { token }), api("/barangays", { token }),
       ]);
       if (!active) return;
+      setBarangayLocations(barangayData);
       const updatedCrops = cropData.map((item) => ({
         id: item.id,
         name: item.name,
@@ -352,6 +472,57 @@ function App() {
       unsubscribe();
     };
   }, [token]);
+
+  useEffect(() => {
+    if (page !== "Map view") return;
+    let active = true;
+    async function loadBoundaries() {
+      setBoundaryStatus("loading");
+      try {
+        const response = await fetch("/data/boac-barangay-boundaries.geojson", { cache: "no-store" });
+        const contentType = response.headers.get("content-type") || "";
+        if (response.status === 404 || !contentType.toLowerCase().includes("json")) {
+          if (active) {
+            setBoundaryFeatures([]);
+            setBoundaryStatus("missing");
+          }
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(`Boundary layer request failed (${response.status})`);
+        }
+        const geojson = await response.json();
+        if (geojson?.type !== "FeatureCollection" || !Array.isArray(geojson.features)) {
+          throw new Error("Boundary layer must be a GeoJSON FeatureCollection");
+        }
+        const features = geojson.features.filter((feature) =>
+          ["Polygon", "MultiPolygon"].includes(feature?.geometry?.type),
+        );
+        const names = features.map(getBoundaryName).filter(Boolean);
+        const uniqueNames = new Set(names.map(normalizeBarangayName));
+        const missingBarangays = barangays.filter((name) =>
+          !uniqueNames.has(normalizeBarangayName(name)),
+        );
+        if (features.length !== 61 || uniqueNames.size !== 61 || missingBarangays.length) {
+          throw new Error(`Boundary layer must contain one named polygon for each of Boac's 61 barangays; found ${uniqueNames.size}.`);
+        }
+        if (active) {
+          setBoundaryFeatures(features);
+          setBoundaryStatus("ready");
+        }
+      } catch (error) {
+        if (active) {
+          setBoundaryFeatures([]);
+          setBoundaryStatus("error");
+          console.error("Could not load a complete Boac barangay boundary layer:", error);
+        }
+      }
+    }
+    loadBoundaries();
+    return () => {
+      active = false;
+    };
+  }, [page, boundaryReload]);
 
   async function login(email, password) {
     const result = await api("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
@@ -435,6 +606,10 @@ function App() {
   if (!user) return <Login onLogin={login} onPreview={preview} />;
   const currentNav = navigation.flatMap((section) => section.items).find(([name]) => name === page);
   const PageIcon = currentNav?.[1] || LayoutDashboard;
+  function openSearchResult() {
+    setPage("Field reports");
+    setSearchFocused(false);
+  }
   return <div className="app-shell">
     <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
       <div className="sidebar-brand"><span className="brand-icon"><Sprout size={21} /></span><span>AgriCast<small>BOAC AGRICULTURE</small></span><button className="close-sidebar" onClick={() => setMobileNav(false)}><X size={18} /></button></div>
@@ -443,11 +618,11 @@ function App() {
       <div className="sidebar-bottom"><div className="sync-status"><span className="sync-icon"><Cloud size={16} /></span><span><strong>{apiOnline ? "Connected to server" : "Demo workspace"}</strong><small>{apiOnline ? "All data is up to date" : "Local preview mode"}</small></span><span className={`online-dot ${apiOnline ? "" : "dot-muted"}`} /></div><button className="profile-button"><span className="avatar">AM</span><span><strong>{user.name || "Alex Morgan"}</strong><small>{user.role?.replaceAll("_", " ") || "Municipal Officer"}</small></span><ChevronDown size={14} /></button></div>
     </aside>
     {mobileNav && <button className="nav-scrim" aria-label="Close menu" onClick={() => setMobileNav(false)} />}
-    <main className="main-area"><header className="topbar"><div className="topbar-left"><button className="mobile-menu" onClick={() => setMobileNav(true)}><Menu size={20} /></button><span className="breadcrumb">Workspace <ChevronRight size={14} /> <PageIcon size={15} /> <strong>{page}</strong></span></div><div className="topbar-actions"><label className="global-search"><Search size={16} /><input placeholder="Search reports, crops..." value={search} onChange={(e) => setSearch(e.target.value)} /><kbd>⌘ K</kbd></label><button className="top-icon" onClick={() => setPage("Notifications")} aria-label="Notifications"><Bell size={18} /><i /></button><span className="top-divider" /><button className="top-avatar" title="Sign out" onClick={signOut}>AM</button></div></header>
-      {page === "Dashboard" && <DashboardHome reports={reports} forecasts={forecasts} selectedBarangay={selectedBarangay} setSelectedBarangay={setSelected} setPage={setPage} />}
-      {page === "Field reports" && <ReportsPage reports={reports} crops={cropCatalog} onReview={review} onNew={() => setModal(true)} onExport={exportData} apiOnline={apiOnline} />}
+    <main className="main-area"><header className="topbar"><div className="topbar-left"><button className="mobile-menu" onClick={() => setMobileNav(true)}><Menu size={20} /></button><span className="breadcrumb">Workspace <ChevronRight size={14} /> <PageIcon size={15} /> <strong>{page}</strong></span></div><div className="topbar-actions"><div className="global-search-wrap" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setSearchFocused(false); }}><label className="global-search"><Search size={16} /><input ref={searchInputRef} aria-label="Search reports and crops" aria-expanded={searchFocused && Boolean(search)} aria-controls="global-search-results" placeholder="Search reports, crops..." value={search} onFocus={() => setSearchFocused(true)} onChange={(e) => setSearch(e.target.value)} onKeyDown={(event) => { if (event.key === "Escape") setSearchFocused(false); if (event.key === "Enter" && search.trim()) openSearchResult(); }} /><kbd>⌘ K</kbd>{search && <button className="search-clear" type="button" aria-label="Clear search" onClick={() => setSearch("")}><X size={14} /></button>}</label>{searchFocused && search.trim() && <div className="search-results" id="global-search-results" role="listbox" aria-label="Matching field reports">{searchResults.length ? searchResults.map((report) => <button className="search-result" key={report.id} role="option" aria-selected="false" onMouseDown={(event) => event.preventDefault()} onClick={openSearchResult}><span className="search-result-main"><strong>{report.farmer}</strong><small>{report.crop} · {report.barangay}</small></span><span className={`search-result-status status-${report.status}`}>{report.status === "submitted" ? "For review" : report.status}</span></button>) : <div className="search-no-results">No matching field reports</div>}<button className="search-all-results" onMouseDown={(event) => event.preventDefault()} onClick={openSearchResult}>View filtered results <ChevronRight size={14} /></button></div>}</div><button className="top-icon" onClick={() => setPage("Notifications")} aria-label="Notifications"><Bell size={18} /><i /></button><span className="top-divider" /><button className="top-avatar" title="Sign out" onClick={signOut}>AM</button></div></header>
+      {page === "Dashboard" && <DashboardHome reports={reports} forecasts={forecasts} locations={barangayLocations} boundaries={boundaryFeatures} selectedBarangay={selectedBarangay} setSelectedBarangay={setSelected} setPage={setPage} />}
+      {page === "Field reports" && <ReportsPage reports={reports} crops={cropCatalog} onReview={review} onNew={() => setModal(true)} onExport={exportData} apiOnline={apiOnline} searchQuery={search.trim()} />}
       {page === "Forecasting" && <ForecastPage forecasts={forecasts} onExport={exportData} />}
-      {page === "Map view" && <MapPage selected={selectedBarangay} setSelected={setSelected} forecasts={forecasts} />}
+      {page === "Map view" && <MapPage selected={selectedBarangay} setSelected={setSelected} forecasts={forecasts} locations={barangayLocations} boundaries={boundaryFeatures} boundaryStatus={boundaryStatus} reloadBoundaries={() => setBoundaryReload((value) => value + 1)} reports={reports} />}
       {page === "Supply allocation" && <AllocationPage token={token} />}
       {page === "Notifications" && <NotificationsPage token={token} />}
       {page === "Reports" && <ReportsExportPage reports={reports} onExport={exportData} />}

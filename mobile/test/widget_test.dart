@@ -39,5 +39,13 @@ void main() {
       ),
       'http://10.0.2.2:4000/api',
     );
+    expect(
+      resolveApiBaseUrl(
+        isWeb: false,
+        currentUri: Uri.parse('file:///app'),
+        override: 'http://192.168.2.9:4000/api',
+      ),
+      'http://192.168.2.9:4000/api',
+    );
   });
 }

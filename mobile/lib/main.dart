@@ -133,34 +133,70 @@ class FieldApi {
   final FlutterSecureStorage storage;
   FieldApi(this.client, this.storage);
 
-  Future<String> login(String email, String password) async {
-    late final http.Response response;
+  Future<http.Response> _send(
+      Future<http.Response> request, String operation) async {
     try {
-      response = await client
-          .post(
-            Uri.parse('$apiBaseUrl/auth/login'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'email': email, 'password': password}),
-          )
-          .timeout(const Duration(seconds: 10));
+      return await request.timeout(const Duration(seconds: 15));
     } on TimeoutException {
       throw Exception(
-          'Login timed out. Check that the API is running at $apiBaseUrl.');
+          '$operation timed out. Check that the API is reachable at $apiBaseUrl.');
     } on http.ClientException {
       throw Exception(
-          'Cannot reach the login API at $apiBaseUrl. Check that the API and MySQL are running and that the API MySQL credentials are configured.');
+          'Cannot reach the API at $apiBaseUrl. Check the API server, network, and device URL.');
     }
-    if (response.statusCode != 200) {
+  }
+
+  String _responseError(http.Response response, String fallback) {
+    try {
       final body = jsonDecode(response.body);
-      throw Exception(body is Map<String, dynamic>
-          ? body['error'] ?? 'Sign in failed'
-          : 'Sign in failed');
+      if (body is Map<String, dynamic> &&
+          body['error'] is String &&
+          (body['error'] as String).isNotEmpty) {
+        final requestId = body['requestId'] ?? response.headers['x-request-id'];
+        final message = body['error'] as String;
+        return requestId is String
+            ? '$message (request ID: $requestId)'
+            : message;
+      }
+    } on FormatException {
+      final requestId = response.headers['x-request-id'];
+      return requestId == null
+          ? fallback
+          : '$fallback (request ID: $requestId)';
     }
-    final result = jsonDecode(response.body);
+    final requestId = response.headers['x-request-id'];
+    return requestId == null ? fallback : '$fallback (request ID: $requestId)';
+  }
+
+  Future<String> login(String email, String password) async {
+    final response = await _send(
+      client.post(
+        Uri.parse('$apiBaseUrl/auth/login'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'email': email, 'password': password}),
+      ),
+      'Login',
+    );
+    if (response.statusCode != 200) {
+      throw Exception(_responseError(response, 'Sign in failed'));
+    }
+    late final Object? decoded;
+    try {
+      decoded = jsonDecode(response.body);
+    } on FormatException {
+      throw Exception('The login API returned invalid JSON.');
+    }
+    if (decoded is! Map<String, dynamic>) {
+      throw Exception('The login API returned an invalid response.');
+    }
+    final result = decoded;
     if (result['user']?['role'] != 'field_officer') {
       throw Exception('This application is for Field Officer accounts.');
     }
-    final token = result['token'] as String;
+    final token = result['token'];
+    if (token is! String || token.isEmpty) {
+      throw Exception('The login API did not return a valid session token.');
+    }
     await storage.write(key: 'jwt', value: token);
     return token;
   }
@@ -168,47 +204,99 @@ class FieldApi {
   Future<void> sync(Map<String, Object?> report) async {
     final token = await storage.read(key: 'jwt');
     if (token == null) throw Exception('Please sign in again before syncing.');
-    final response = await client.post(
-      Uri.parse('$apiBaseUrl/reports'),
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer $token'
-      },
-      body: jsonEncode(_reportBody(report)..['clientReportId'] = report['id']),
+    final response = await _send(
+      client.post(
+        Uri.parse('$apiBaseUrl/reports'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token'
+        },
+        body:
+            jsonEncode(_reportBody(report)..['clientReportId'] = report['id']),
+      ),
+      'Report sync',
     );
     if (response.statusCode != 200 && response.statusCode != 201) {
-      throw Exception(
-          jsonDecode(response.body)['error'] ?? 'Report sync failed');
+      throw Exception(_responseError(response, 'Report sync failed'));
     }
+  }
+
+  Future<List<Map<String, Object?>>> fetchReports() async {
+    final token = await storage.read(key: 'jwt');
+    if (token == null) throw Exception('Please sign in again before syncing.');
+    final response = await _send(
+      client.get(
+        Uri.parse('$apiBaseUrl/reports'),
+        headers: {'Authorization': 'Bearer $token'},
+      ),
+      'Report download',
+    );
+    if (response.statusCode != 200) {
+      throw Exception(_responseError(response, 'Report download failed'));
+    }
+
+    late final Object? decoded;
+    try {
+      decoded = jsonDecode(response.body);
+    } on FormatException {
+      throw Exception('The reports API returned invalid JSON.');
+    }
+    if (decoded is! List) {
+      throw Exception('The reports API returned an invalid response.');
+    }
+    return decoded.map((item) {
+      if (item is! Map<String, dynamic>) {
+        throw Exception('The reports API returned an invalid report.');
+      }
+      return <String, Object?>{
+        'id': item['id'],
+        'farmer_name': item['farmer_name'],
+        'barangay_name': item['barangay_name'],
+        'crop_name': item['crop_name'],
+        'area_ha': num.tryParse(item['area_ha']?.toString() ?? ''),
+        'planting_date': item['planting_date']?.toString(),
+        'planting_method': item['planting_method'],
+        'latitude': num.tryParse(item['latitude']?.toString() ?? ''),
+        'longitude': num.tryParse(item['longitude']?.toString() ?? ''),
+        'status': item['status'],
+        'sync_state': 'synced',
+        'created_at':
+            item['created_at']?.toString() ?? DateTime.now().toIso8601String(),
+      };
+    }).toList();
   }
 
   Future<void> updateReport(Map<String, Object?> report) async {
     final token = await storage.read(key: 'jwt');
     if (token == null) throw Exception('Please sign in again before syncing.');
-    final response = await client.put(
-      Uri.parse('$apiBaseUrl/reports/${report['id']}'),
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': '******'
-      },
-      body: jsonEncode(_reportBody(report)),
+    final response = await _send(
+      client.put(
+        Uri.parse('$apiBaseUrl/reports/${report['id']}'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: jsonEncode(_reportBody(report)),
+      ),
+      'Report update',
     );
     if (response.statusCode != 200) {
-      throw Exception(
-          jsonDecode(response.body)['error'] ?? 'Report update failed');
+      throw Exception(_responseError(response, 'Report update failed'));
     }
   }
 
   Future<void> deleteReport(String reportId) async {
     final token = await storage.read(key: 'jwt');
     if (token == null) throw Exception('Please sign in again before syncing.');
-    final response = await client.delete(
-      Uri.parse('$apiBaseUrl/reports/$reportId'),
-      headers: {'Authorization': '******'},
+    final response = await _send(
+      client.delete(
+        Uri.parse('$apiBaseUrl/reports/$reportId'),
+        headers: {'Authorization': 'Bearer $token'},
+      ),
+      'Report deletion',
     );
     if (response.statusCode != 200) {
-      throw Exception(
-          jsonDecode(response.body)['error'] ?? 'Report deletion failed');
+      throw Exception(_responseError(response, 'Report deletion failed'));
     }
   }
 
@@ -302,8 +390,7 @@ class LoginPage extends StatefulWidget {
 }
 
 class _LoginPageState extends State<LoginPage> {
-  final email =
-      TextEditingController(text: 'field_officer@boac.gov.ph');
+  final email = TextEditingController(text: 'field_officer@boac.gov.ph');
   final password = TextEditingController(text: 'BoacDemo123!');
   bool busy = false;
   String? error;
@@ -352,8 +439,8 @@ class _LoginPageState extends State<LoginPage> {
                       style: TextStyle(color: Color(0xFF748177), height: 1.5)),
                   const SizedBox(height: 8),
                   const Text(
-                      'Demo account: field_officer@boac.gov.ph · BoacDemo123!',
-                      style: TextStyle(fontSize: 11, color: Color(0xFF748177)),
+                    'Demo account: field_officer@boac.gov.ph · BoacDemo123!',
+                    style: TextStyle(fontSize: 11, color: Color(0xFF748177)),
                   ),
                   const SizedBox(height: 24),
                   TextField(
@@ -420,8 +507,7 @@ class _FieldHomeState extends State<FieldHome> {
       if (connected && mounted) syncQueued();
     });
     Connectivity().checkConnectivity().then((results) {
-      final connected =
-          results.any((item) => item != ConnectivityResult.none);
+      final connected = results.any((item) => item != ConnectivityResult.none);
       if (mounted) {
         setState(() => online = connected);
       }
@@ -452,6 +538,7 @@ class _FieldHomeState extends State<FieldHome> {
   Future<void> syncQueued() async {
     if (syncing) return;
     setState(() => syncing = true);
+    syncError = null;
     final db = await widget.database;
     final queued = await db.query('reports',
         where: "sync_state = 'queued' AND status = 'submitted'");
@@ -464,6 +551,17 @@ class _FieldHomeState extends State<FieldHome> {
       } catch (error) {
         syncError = error.toString().replaceFirst('Exception: ', '');
         break;
+      }
+    }
+    if (syncError == null) {
+      try {
+        final serverReports = await widget.api.fetchReports();
+        for (final report in serverReports) {
+          await db.insert('reports', report,
+              conflictAlgorithm: ConflictAlgorithm.replace);
+        }
+      } catch (error) {
+        syncError = error.toString().replaceFirst('Exception: ', '');
       }
     }
     if (mounted) {

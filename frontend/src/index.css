@@ -1,5 +1,7 @@
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap');
-@import "tailwindcss";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 :root{
   font-family:"DM Sans",sans-serif;
   color:#24332a;
@@ -275,6 +277,9 @@ small{
   border-radius:7px;
   color:#98a39a
 }
+.global-search-wrap{
+  position:relative
+}
 .global-search input{
   border:0;
   outline:0;
@@ -291,6 +296,101 @@ small{
   border-radius:4px;
   padding:2px 4px;
   color:#8e9990
+}
+.search-clear{
+  display:grid;
+  place-items:center;
+  padding:2px;
+  border:0;
+  border-radius:4px;
+  background:transparent;
+  color:#748177
+}
+.search-clear:hover{
+  background:#edf2ec;
+  color:#2f7141
+}
+.search-results{
+  position:absolute;
+  top:calc(100% + 8px);
+  right:0;
+  z-index:30;
+  width:min(360px, calc(100vw - 32px));
+  overflow:hidden;
+  border:1px solid #e5ebe4;
+  border-radius:10px;
+  background:#fff;
+  box-shadow:0 12px 30px #233b2b20
+}
+.search-result{
+  display:flex;
+  width:100%;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding:11px 13px;
+  border:0;
+  border-bottom:1px solid #eef1ed;
+  background:#fff;
+  text-align:left
+}
+.search-result:hover,.search-result:focus-visible{
+  background:#f6f9f5
+}
+.search-result-main{
+  min-width:0
+}
+.search-result-main strong,.search-result-main small{
+  display:block;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap
+}
+.search-result-main strong{
+  color:#35463a;
+  font-size:12px
+}
+.search-result-main small{
+  margin-top:3px;
+  color:#829087;
+  font-size:10px
+}
+.search-result-status{
+  flex:none;
+  padding:4px 7px;
+  border-radius:20px;
+  background:#edf5eb;
+  color:#367448;
+  font-size:9px;
+  text-transform:capitalize
+}
+.search-result-status.status-submitted{
+  background:#fff4df;
+  color:#9b6b18
+}
+.search-result-status.status-rejected{
+  background:#fff0ee;
+  color:#a3463e
+}
+.search-no-results{
+  padding:16px 13px;
+  color:#748177;
+  font-size:11px
+}
+.search-all-results{
+  display:flex;
+  width:100%;
+  align-items:center;
+  justify-content:space-between;
+  padding:10px 13px;
+  border:0;
+  background:#fafcf9;
+  color:#367448;
+  font-size:11px;
+  font-weight:600
+}
+.search-all-results:hover{
+  background:#f1f6ef
 }
 .top-icon,.icon-button{
   width:32px;

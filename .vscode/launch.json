@@ -1,0 +1,28 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "chrome",
+            "request": "launch",
+            "name": "AgriCast Web (Chrome)",
+            "url": "http://localhost:5173",
+            "webRoot": "${workspaceFolder}\\frontend",
+            "preLaunchTask": "Start AgriCast Services"
+        },
+        {
+            "type": "dart",
+            "request": "launch",
+            "name": "AgriCast Field (Chrome)",
+            "program": "${workspaceFolder}\\mobile\\lib\\main.dart",
+            "deviceId": "chrome",
+            "args": [
+                "--web-port",
+                "5174"
+            ],
+            "preLaunchTask": "Start AgriCast Services"
+        }
+    ]
+}

@@ -1,16 +1,31 @@
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:4000/api";
+const API_URL = import.meta.env.VITE_API_URL ||
+  `${window.location.protocol}//${window.location.hostname}:4000/api`;
 
 export async function api(path, { token, ...options } = {}) {
-  const response = await fetch(`${API_URL}${path}`, {
-    ...options,
-    headers: {
+  let response;
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      ...options,
+      headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options?.headers,
-    },
-  });
+      },
+    });
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error(
+        `Cannot reach the API at ${API_URL}. Check the API server, network, and CORS configuration.`,
+      );
+    }
+    throw error;
+  }
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
+  if (!response.ok) {
+    const requestId = body.requestId || response.headers.get("X-Request-Id");
+    const message = body.error || `Request failed (${response.status})`;
+    throw new Error(requestId ? `${message} (request ID: ${requestId})` : message);
+  }
   return body;
 }
 
