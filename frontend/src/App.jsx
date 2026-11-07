@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { api } from "./api.js";
+import { api, subscribeToUpdates } from "./api.js";
 import { barangays, crops, forecastRows, initialReports, notifications as demoNotifications } from "./data.js";
 
 const navigation = [
@@ -136,7 +136,7 @@ function DashboardHome({ reports, forecasts, selectedBarangay, setSelectedBarang
   </div>;
 }
 
-function ReportsPage({ reports, onReview, onNew, onExport, apiOnline }) {
+function ReportsPage({ reports, crops: cropCatalog, onReview, onNew, onExport, apiOnline }) {
   const [filter, setFilter] = useState("all");
   const visible = reports.filter((report) => filter === "all" || report.status === filter);
   return <div className="page-content">
@@ -144,7 +144,7 @@ function ReportsPage({ reports, onReview, onNew, onExport, apiOnline }) {
     {!apiOnline && <div className="info-banner"><Cloud size={16} /> Demo data is stored in this browser session. Connect the API to save submissions centrally.</div>}
     <section className="metric-grid compact-metrics"><MetricCard label="Total reports" value={reports.length} unit="" change="+8 this month" icon={FileText} tone="blue" /><MetricCard label="Awaiting review" value={reports.filter((r) => r.status === "submitted").length} unit="" change="needs attention" icon={ClipboardCheck} tone="orange" /><MetricCard label="Approved" value={reports.filter((r) => r.status === "approved").length} unit="" change="+5 this month" icon={Check} tone="green" /></section>
     <article className="panel full-panel"><div className="panel-heading"><div className="tab-buttons">{["all", "submitted", "approved", "rejected"].map((item) => <button key={item} className={filter === item ? "tab-active" : ""} onClick={() => setFilter(item)}>{item === "all" ? "All reports" : item === "submitted" ? "For review" : item[0].toUpperCase() + item.slice(1)}{item === "submitted" && <span>{reports.filter((r) => r.status === "submitted").length}</span>}</button>)}</div><div className="table-tools"><button className="button button-light" onClick={() => onExport("excel")}><Download size={15} /> Export</button><button className="icon-button"><Filter size={16} /></button></div></div>
-      <div className="table-scroll"><table><thead><tr><th>REPORT / FARMER</th><th>BARANGAY</th><th>CROP</th><th>AREA</th><th>EXPECTED HARVEST</th><th>STATUS</th><th>ACTION</th></tr></thead><tbody>{visible.map((r) => <tr key={r.id}><td><strong>{r.displayId || r.id}</strong><small>{r.farmer}</small></td><td>{r.barangay}</td><td><span className="crop-cell"><i style={{ background: crops.find((crop) => crop.name === r.crop)?.color || "#39834c" }} />{r.crop}</span></td><td>{Number(r.area).toFixed(1)} ha</td><td><strong>{formatNumber(r.volume)} kg</strong><small>{r.harvest}</small></td><td><StatusBadge status={r.status} /></td><td>{r.status === "submitted" ? <div className="row-actions"><button title="Approve" className="action-check" onClick={() => onReview(r, "approved")}><Check size={16} /></button><button title="Reject" className="action-reject" onClick={() => onReview(r, "rejected")}><X size={16} /></button></div> : <button className="subtle-link">Details <ChevronRight size={13} /></button>}</td></tr>)}</tbody></table></div>
+      <div className="table-scroll"><table><thead><tr><th>REPORT / FARMER</th><th>BARANGAY</th><th>CROP</th><th>AREA</th><th>EXPECTED HARVEST</th><th>STATUS</th><th>ACTION</th></tr></thead><tbody>{visible.map((r) => <tr key={r.id}><td><strong>{r.displayId || r.id}</strong><small>{r.farmer}</small></td><td>{r.barangay}</td><td><span className="crop-cell"><i style={{ background: cropCatalog.find((crop) => crop.name === r.crop)?.color || "#39834c" }} />{r.crop}</span></td><td>{Number(r.area).toFixed(1)} ha</td><td><strong>{formatNumber(r.volume)} kg</strong><small>{r.harvest}</small></td><td><StatusBadge status={r.status} /></td><td>{r.status === "submitted" ? <div className="row-actions"><button title="Approve" className="action-check" onClick={() => onReview(r, "approved")}><Check size={16} /></button><button title="Reject" className="action-reject" onClick={() => onReview(r, "rejected")}><X size={16} /></button></div> : <button className="subtle-link">Details <ChevronRight size={13} /></button>}</td></tr>)}</tbody></table></div>
       {!visible.length && <div className="empty-state">No reports in this category yet.</div>}
     </article>
   </div>;
@@ -186,11 +186,20 @@ function AllocationPage({ token }) {
   ]);
   useEffect(() => {
     if (!token) return;
-    api("/recommendations", { token }).then((items) => setRecommendations(items.map((item) => ({
-      id: item.id, crop: item.crop_name, source: `${item.source_barangay}, Boac`, target: item.target_municipality,
-      surplus: Number(item.surplus_kg), recommend: Number(item.recommended_kg), status: item.status,
-      color: item.crop_name.toLowerCase() === "tomato" ? "tomato" : item.crop_name.toLowerCase() === "corn" ? "corn" : "rice",
-    })))).catch((error) => console.error("Could not load allocation recommendations:", error));
+    let active = true;
+    const load = () => api("/recommendations", { token }).then((items) => {
+      if (active) setRecommendations(items.map((item) => ({
+        id: item.id, crop: item.crop_name, source: `${item.source_barangay}, Boac`, target: item.target_municipality,
+        surplus: Number(item.surplus_kg), recommend: Number(item.recommended_kg), status: item.status,
+        color: item.crop_name.toLowerCase() === "tomato" ? "tomato" : item.crop_name.toLowerCase() === "corn" ? "corn" : "rice",
+      })));
+    }).catch((error) => console.error("Could not load allocation recommendations:", error));
+    window.addEventListener("agricast:data-changed", load);
+    load();
+    return () => {
+      active = false;
+      window.removeEventListener("agricast:data-changed", load);
+    };
   }, [token]);
   async function accept(index) {
     const recommendation = recommendations[index];
@@ -213,12 +222,19 @@ function NotificationsPage({ token }) {
   const [items, setItems] = useState(demoNotifications);
   useEffect(() => {
     if (!token) return;
-    api("/notifications", { token }).then((data) => {
-      if (data.length) setItems(data.map((item) => ({
+    let active = true;
+    const load = () => api("/notifications", { token }).then((data) => {
+      if (active && data.length) setItems(data.map((item) => ({
         title: item.title, detail: item.message, time: new Date(item.created_at).toLocaleDateString(),
         tone: item.risk_status === "oversupply" ? "green" : item.risk_status === "shortage" ? "amber" : "blue",
       })));
     }).catch((error) => console.error("Could not load notifications:", error));
+    window.addEventListener("agricast:data-changed", load);
+    load();
+    return () => {
+      active = false;
+      window.removeEventListener("agricast:data-changed", load);
+    };
   }, [token]);
   return <div className="page-content"><div className="page-heading"><div><p className="eyebrow">STAY IN THE LOOP</p><h1>Notifications</h1><p className="muted">Harvest alerts, review reminders, and supply signals.</p></div><button className="button button-light">Mark all as read</button></div><article className="panel notification-list"><div className="notification-date">LATEST <span>{items.length} alerts</span></div>{items.map((item, i) => <div className="notification-row" key={`${item.title}-${i}`}><span className={`notification-symbol ${item.tone}`}>{i === 0 ? <Sprout size={17} /> : i === 1 ? <Boxes size={17} /> : <ClipboardCheck size={17} />}</span><div><strong>{item.title}</strong><p>{item.detail}</p><small>{item.time} · Agriculture Office</small></div><span className="unread-dot" /></div>)}</article></div>;
 }
@@ -262,10 +278,10 @@ function SettingsPage({ token, user }) {
   </div>;
 }
 
-function ReportModal({ onClose, onSave }) {
+function ReportModal({ onClose, onSave, crops: cropCatalog }) {
   const [form, setForm] = useState({ farmer: "", barangay: "Agumaymayan", crop: "Rice", area: "", planted: new Date().toISOString().slice(0, 10), method: "Transplanting" });
   const [position, setPosition] = useState(null);
-  const crop = crops.find((item) => item.name === form.crop);
+  const crop = cropCatalog.find((item) => item.name === form.crop);
   const harvestDate = new Date(`${form.planted}T00:00:00`);
   harvestDate.setDate(harvestDate.getDate() + (crop?.maturity || 0));
   const volume = Number(form.area || 0) * (crop?.yield || 0);
@@ -276,7 +292,7 @@ function ReportModal({ onClose, onSave }) {
   }
   return <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}><form className="report-modal" onSubmit={(e) => { e.preventDefault(); onSave({ ...form, ...position, volume, harvest: harvestDate.toISOString().slice(0, 10) }); }}>
     <div className="modal-header"><div><p className="eyebrow">FIELD DATA COLLECTION</p><h2>New field report</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={18} /></button></div>
-    <div className="form-grid"><label className="wide-field">Farmer name<input required value={form.farmer} onChange={(e) => update("farmer", e.target.value)} placeholder="Enter farmer's full name" /></label><label>Barangay<select value={form.barangay} onChange={(e) => update("barangay", e.target.value)}>{barangays.map((name) => <option key={name}>{name}</option>)}</select></label><label>Crop type<select value={form.crop} onChange={(e) => update("crop", e.target.value)}>{crops.map((item) => <option key={item.id}>{item.name}</option>)}</select></label><label>Planted area (hectares)<input type="number" min="0.01" step="0.01" required value={form.area} onChange={(e) => update("area", e.target.value)} placeholder="e.g. 1.5" /></label><label>Planting date<input type="date" required value={form.planted} onChange={(e) => update("planted", e.target.value)} /></label><label>Planting method<select value={form.method} onChange={(e) => update("method", e.target.value)}><option>Direct Seeding</option><option>Transplanting</option></select></label><div className="location-field"><div><strong>Farm GPS location</strong><small>{position ? `${position.latitude.toFixed(5)}, ${position.longitude.toFixed(5)}` : "Capture coordinates at the farm visit"}</small></div><button type="button" className="button button-light" onClick={locate}><LocateFixed size={15} /> {position ? "Captured" : "Capture GPS"}</button></div></div>
+    <div className="form-grid"><label className="wide-field">Farmer name<input required value={form.farmer} onChange={(e) => update("farmer", e.target.value)} placeholder="Enter farmer's full name" /></label><label>Barangay<select value={form.barangay} onChange={(e) => update("barangay", e.target.value)}>{barangays.map((name) => <option key={name}>{name}</option>)}</select></label><label>Crop type<select value={form.crop} onChange={(e) => update("crop", e.target.value)}>{cropCatalog.map((item) => <option key={item.id}>{item.name}</option>)}</select></label><label>Planted area (hectares)<input type="number" min="0.01" step="0.01" required value={form.area} onChange={(e) => update("area", e.target.value)} placeholder="e.g. 1.5" /></label><label>Planting date<input type="date" required value={form.planted} onChange={(e) => update("planted", e.target.value)} /></label><label>Planting method<select value={form.method} onChange={(e) => update("method", e.target.value)}><option>Direct Seeding</option><option>Transplanting</option></select></label><div className="location-field"><div><strong>Farm GPS location</strong><small>{position ? `${position.latitude.toFixed(5)}, ${position.longitude.toFixed(5)}` : "Capture coordinates at the farm visit"}</small></div><button type="button" className="button button-light" onClick={locate}><LocateFixed size={15} /> {position ? "Captured" : "Capture GPS"}</button></div></div>
     <div className="calculation-box"><div><span>Expected harvest</span><strong>{formatNumber(volume)} kg</strong><small>{form.area || "0"} ha × {formatNumber(crop?.yield)} kg/ha</small></div><div><span>Estimated harvest date</span><strong>{harvestDate.toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}</strong><small>{crop?.maturity} days after planting</small></div></div>
     <div className="modal-footer"><button type="button" className="button button-light" onClick={() => onSave({ ...form, ...position, volume, harvest: harvestDate.toISOString().slice(0, 10), status: "draft" })}>Save draft</button><button className="button button-primary"><Check size={15} /> Submit report</button></div>
   </form></div>;
@@ -289,6 +305,7 @@ function App() {
   const [token, setToken] = useState(() => localStorage.getItem("agriflow_token"));
   const [page, setPage] = useState("Dashboard");
   const [reports, setReports] = useState(initialReports);
+  const [cropCatalog, setCropCatalog] = useState(crops);
   const [forecasts, setForecasts] = useState(forecastRows());
   const [apiOnline, setApiOnline] = useState(false);
   const [modal, setModal] = useState(false);
@@ -300,18 +317,40 @@ function App() {
   useEffect(() => {
     if (!token) return;
     let active = true;
-    Promise.all([api("/reports", { token }), api("/forecasts", { token })]).then(([reportData, forecastData]) => {
+    async function refresh() {
+      const [reportData, forecastData, cropData] = await Promise.all([
+        api("/reports", { token }), api("/forecasts", { token }), api("/crops", { token }),
+      ]);
       if (!active) return;
+      const updatedCrops = cropData.map((item) => ({
+        id: item.id,
+        name: item.name,
+        yield: Number(item.average_yield_kg_ha),
+        maturity: Number(item.maturity_days),
+        color: crops.find((crop) => crop.name === item.name)?.color || "#39834c",
+      }));
+      setCropCatalog(updatedCrops);
       setReports(reportData.map((item) => ({
         id: item.id, displayId: item.id.slice(0, 8).toUpperCase(), farmer: item.farmer_name, barangay: item.barangay_name, crop: item.crop_name,
         area: Number(item.area_ha), planted: item.planting_date?.slice(0, 10),
-        harvest: item.planting_date ? formatDate(new Date(new Date(item.planting_date).getTime() + (crops.find((c) => c.name === item.crop_name)?.maturity || 0) * 86400000).toISOString().slice(0, 10)) : "—",
-        volume: Number(item.area_ha) * (crops.find((c) => c.name === item.crop_name)?.yield || 0), status: item.status, method: item.planting_method,
+        harvest: item.planting_date ? formatDate(new Date(new Date(item.planting_date).getTime() + (updatedCrops.find((crop) => crop.name === item.crop_name)?.maturity || 0) * 86400000).toISOString().slice(0, 10)) : "—",
+        volume: Number(item.area_ha) * (updatedCrops.find((crop) => crop.name === item.crop_name)?.yield || 0), status: item.status, method: item.planting_method,
       })));
       setForecasts(forecastData);
       setApiOnline(true);
-    }).catch(() => setApiOnline(false));
-    return () => { active = false; };
+    }
+    const initialLoad = () => refresh().catch(() => setApiOnline(false));
+    initialLoad();
+    const unsubscribe = subscribeToUpdates(token, () => {
+      initialLoad();
+      window.dispatchEvent(new Event("agricast:data-changed"));
+    }, (connected) => {
+      if (active && !connected) setApiOnline(false);
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, [token]);
 
   async function login(email, password) {
@@ -340,16 +379,22 @@ function App() {
     setReports((items) => items.map((item) => item.id === report.id ? { ...item, status } : item));
   }
   async function saveReport(form) {
+    let persisted;
     if (token) {
       try {
-        await api("/reports", { method: "POST", token, body: JSON.stringify({
+        persisted = await api("/reports", { method: "POST", token, body: JSON.stringify({
           barangayName: form.barangay, cropName: form.crop, farmerName: form.farmer,
           areaHa: Number(form.area), plantingDate: form.planted, plantingMethod: form.method,
           latitude: form.latitude, longitude: form.longitude, status: form.status || "submitted",
         }) });
       } catch (error) { window.alert(error.message); return; }
     }
-    const newReport = { id: `BO-${new Date().getFullYear()}-${String(Date.now()).slice(-3)}`, ...form, status: form.status || "submitted" };
+    const newReport = {
+      id: persisted?.id || `BO-${new Date().getFullYear()}-${String(Date.now()).slice(-3)}`,
+      displayId: persisted?.id?.slice(0, 8).toUpperCase(),
+      ...form,
+      status: form.status || "submitted",
+    };
     setReports((items) => [newReport, ...items]); setModal(false);
   }
 
@@ -400,7 +445,7 @@ function App() {
     {mobileNav && <button className="nav-scrim" aria-label="Close menu" onClick={() => setMobileNav(false)} />}
     <main className="main-area"><header className="topbar"><div className="topbar-left"><button className="mobile-menu" onClick={() => setMobileNav(true)}><Menu size={20} /></button><span className="breadcrumb">Workspace <ChevronRight size={14} /> <PageIcon size={15} /> <strong>{page}</strong></span></div><div className="topbar-actions"><label className="global-search"><Search size={16} /><input placeholder="Search reports, crops..." value={search} onChange={(e) => setSearch(e.target.value)} /><kbd>⌘ K</kbd></label><button className="top-icon" onClick={() => setPage("Notifications")} aria-label="Notifications"><Bell size={18} /><i /></button><span className="top-divider" /><button className="top-avatar" title="Sign out" onClick={signOut}>AM</button></div></header>
       {page === "Dashboard" && <DashboardHome reports={reports} forecasts={forecasts} selectedBarangay={selectedBarangay} setSelectedBarangay={setSelected} setPage={setPage} />}
-      {page === "Field reports" && <ReportsPage reports={reports} onReview={review} onNew={() => setModal(true)} onExport={exportData} apiOnline={apiOnline} />}
+      {page === "Field reports" && <ReportsPage reports={reports} crops={cropCatalog} onReview={review} onNew={() => setModal(true)} onExport={exportData} apiOnline={apiOnline} />}
       {page === "Forecasting" && <ForecastPage forecasts={forecasts} onExport={exportData} />}
       {page === "Map view" && <MapPage selected={selectedBarangay} setSelected={setSelected} forecasts={forecasts} />}
       {page === "Supply allocation" && <AllocationPage token={token} />}
@@ -409,7 +454,7 @@ function App() {
       {page === "Settings" && <SettingsPage token={token} user={user} />}
       <footer className="app-footer"><span>AgriCast <span>·</span> Municipal Agriculture Office of Boac</span><span>Data for planning purposes <span>·</span> v1.0.0</span></footer>
     </main>
-    {modal && <ReportModal onClose={() => setModal(false)} onSave={saveReport} />}
+    {modal && <ReportModal crops={cropCatalog} onClose={() => setModal(false)} onSave={saveReport} />}
   </div>;
 }
 

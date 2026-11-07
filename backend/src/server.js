@@ -1,16 +1,29 @@
 import express from "express";
+import { randomUUID } from "node:crypto";
 import cors from "cors";
 import helmet from "helmet";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { pool, initializeDatabase } from "./db.js";
+import { pool, initializeDatabase, seedDatabase } from "./db.js";
 import { requireAuth, allowRoles } from "./auth.js";
 import { allocationPlan, estimatedHarvestDate, expectedHarvest, supplyStatus } from "./domain.js";
+import { createDataChangeFeed } from "./realtime.js";
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
 const roles = ["admin", "municipal_officer", "provincial_officer", "field_officer"];
 const officerRoles = ["admin", "municipal_officer", "provincial_officer"];
+let dataChanges;
+
+async function releaseClient(client) {
+  try {
+    await client.query("SET @app_user_id = NULL");
+  } catch (error) {
+    await client.release(true);
+    throw error;
+  }
+  await client.release();
+}
 
 app.use(helmet());
 app.use(cors({
@@ -20,11 +33,30 @@ app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => res.json({ status: "ok" }));
 
+app.get("/api/events", requireAuth, (req, res) => {
+  res.status(200).set({
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.flushHeaders();
+  res.write(`event: connected\ndata: ${JSON.stringify({ type: "connected" })}\n\n`);
+  const unsubscribe = dataChanges.subscribe((change) => {
+    res.write(`event: change\ndata: ${JSON.stringify(change)}\n\n`);
+  });
+  const heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 25000);
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+  });
+});
+
 app.post("/api/auth/login", async (req, res, next) => {
   try {
     const email = String(req.body?.email || "").trim().toLowerCase();
     const password = String(req.body?.password || "");
-    const result = await pool.query("SELECT id, name, email, role, password_hash FROM users WHERE lower(email) = $1 AND is_active = true", [email]);
+    const result = await pool.query("SELECT id, name, email, role, password_hash FROM users WHERE lower(email) = ? AND is_active = TRUE", [email]);
     const user = result.rows[0];
     if (!user || !(await bcrypt.compare(password, user.password_hash))) {
       return res.status(401).json({ error: "Email or password is incorrect" });
@@ -38,7 +70,7 @@ app.post("/api/auth/login", async (req, res, next) => {
 
 app.get("/api/auth/me", requireAuth, async (req, res, next) => {
   try {
-    const { rows } = await pool.query("SELECT id, name, email, role FROM users WHERE id = $1", [req.user.sub]);
+    const { rows } = await pool.query("SELECT id, name, email, role FROM users WHERE id = ?", [req.user.sub]);
     if (!rows[0]) return res.status(404).json({ error: "User not found" });
     res.json(rows[0]);
   } catch (error) {
@@ -75,10 +107,10 @@ app.get("/api/reports", requireAuth, async (req, res, next) => {
       `SELECT r.*, b.name AS barangay_name, c.name AS crop_name, u.name AS farmer_name
        FROM field_reports r JOIN barangays b ON b.id = r.barangay_id
        JOIN crop_types c ON c.id = r.crop_type_id JOIN farmers u ON u.id = r.farmer_id
-       WHERE ($1::text IS NULL OR r.status = $1)
-         AND ($2::text <> 'field_officer' OR r.submitted_by = $3)
+       WHERE (? IS NULL OR r.status = ?)
+         AND (? <> 'field_officer' OR r.submitted_by = ?)
        ORDER BY r.created_at DESC`,
-      [status, req.user.role, req.user.sub],
+      [status, status, req.user.role, req.user.sub],
     );
     res.json(rows);
   } catch (error) {
@@ -103,8 +135,9 @@ app.post("/api/reports", requireAuth, async (req, res, next) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    await client.query("SET @app_user_id = ?", [req.user.sub]);
     if (clientReportId) {
-      const existing = await client.query("SELECT id, submitted_by FROM field_reports WHERE id = $1", [clientReportId]);
+      const existing = await client.query("SELECT id, submitted_by FROM field_reports WHERE id = ?", [clientReportId]);
       if (existing.rows[0]) {
         if (existing.rows[0].submitted_by !== req.user.sub) {
           await client.query("ROLLBACK");
@@ -119,37 +152,174 @@ app.post("/api/reports", requireAuth, async (req, res, next) => {
        FROM barangays b CROSS JOIN crop_types c
        JOIN municipalities m ON m.id = b.municipality_id
        JOIN crop_maturity_periods maturity ON maturity.crop_type_id = c.id
-       WHERE b.name = $1 AND c.name = $2 AND m.name = 'Boac'`,
+       WHERE b.name = ? AND c.name = ? AND m.name = 'Boac'`,
       [barangayName.trim(), cropName.trim()],
     );
     if (!references.rows[0]) {
       await client.query("ROLLBACK");
       return res.status(400).json({ error: "The selected Boac barangay or crop type was not found" });
     }
-    const farmer = await client.query(
-      `INSERT INTO farmers (name) VALUES ($1) RETURNING id`,
-      [farmerName.trim()],
-    );
-    const report = await client.query(
+    const farmer = await client.query("INSERT INTO farmers (name) VALUES (?)", [farmerName.trim()]);
+    const reportId = clientReportId || randomUUID();
+    await client.query(
       `INSERT INTO field_reports (id, barangay_id, farmer_id, crop_type_id, area_ha, planting_date, planting_method,
         latitude, longitude, notes, status, submitted_by)
-       VALUES (COALESCE($1::uuid,gen_random_uuid()),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
-      [clientReportId || null, references.rows[0].barangay_id, farmer.rows[0].id, references.rows[0].crop_type_id, Number(areaHa), plantingDate, plantingMethod,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [reportId, references.rows[0].barangay_id, farmer.insertId, references.rows[0].crop_type_id, Number(areaHa), plantingDate, plantingMethod,
         latitude ?? null, longitude ?? null, notes ?? null, status, req.user.sub],
     );
     await client.query(
       `INSERT INTO harvest_schedules (field_report_id, expected_harvest_date, expected_harvest_kg)
-       VALUES ($1,$2,$3)`,
-      [report.rows[0].id, estimatedHarvestDate(plantingDate, references.rows[0].maturity_days),
+       VALUES (?,?,?)`,
+      [reportId, estimatedHarvestDate(plantingDate, references.rows[0].maturity_days),
         expectedHarvest(areaHa, references.rows[0].average_yield_kg_ha)],
     );
     await client.query("COMMIT");
-    res.status(201).json(report.rows[0]);
+    const { rows } = await pool.query("SELECT * FROM field_reports WHERE id = ?", [reportId]);
+    res.status(201).json(rows[0]);
   } catch (error) {
     await client.query("ROLLBACK");
     next(error);
   } finally {
-    client.release();
+    await releaseClient(client);
+  }
+});
+
+app.put("/api/reports/:id", requireAuth, async (req, res, next) => {
+  const reportId = req.params.id;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(reportId)) {
+    return res.status(400).json({ error: "A valid report identifier is required" });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET @app_user_id = ?", [req.user.sub]);
+    const existing = await client.query(
+      `SELECT r.*, b.name AS barangay_name, c.name AS crop_name, f.name AS farmer_name
+       FROM field_reports r JOIN barangays b ON b.id = r.barangay_id
+       JOIN crop_types c ON c.id = r.crop_type_id JOIN farmers f ON f.id = r.farmer_id
+       WHERE r.id = ? FOR UPDATE`,
+      [reportId],
+    );
+    const current = existing.rows[0];
+    if (!current) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Report not found" });
+    }
+    if (req.user.role === "field_officer" &&
+        (current.submitted_by !== req.user.sub || !["draft", "submitted"].includes(current.status))) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Report not found" });
+    }
+
+    const input = {
+      barangayName: req.body?.barangayName ?? current.barangay_name,
+      cropName: req.body?.cropName ?? current.crop_name,
+      farmerName: req.body?.farmerName ?? current.farmer_name,
+      areaHa: req.body?.areaHa ?? current.area_ha,
+      plantingDate: req.body?.plantingDate ?? (
+        current.planting_date instanceof Date
+          ? current.planting_date.toISOString().slice(0, 10)
+          : String(current.planting_date).slice(0, 10)
+      ),
+      plantingMethod: req.body?.plantingMethod ?? current.planting_method,
+      latitude: Object.hasOwn(req.body || {}, "latitude") ? req.body.latitude : current.latitude,
+      longitude: Object.hasOwn(req.body || {}, "longitude") ? req.body.longitude : current.longitude,
+      notes: Object.hasOwn(req.body || {}, "notes") ? req.body.notes : current.notes,
+      status: req.user.role === "field_officer"
+        ? (req.body?.status ?? current.status)
+        : current.status,
+    };
+    const parsedDate = typeof input.plantingDate === "string" ? new Date(`${input.plantingDate}T00:00:00Z`) : null;
+    const validDate = parsedDate && !Number.isNaN(parsedDate.getTime()) &&
+      parsedDate.toISOString().slice(0, 10) === input.plantingDate;
+    const validCoordinates = (input.latitude == null && input.longitude == null) ||
+      (Number.isFinite(Number(input.latitude)) && Number.isFinite(Number(input.longitude)) &&
+        Number(input.latitude) >= -90 && Number(input.latitude) <= 90 &&
+        Number(input.longitude) >= -180 && Number(input.longitude) <= 180);
+    if (typeof input.barangayName !== "string" || !input.barangayName.trim() ||
+        typeof input.cropName !== "string" || !input.cropName.trim() ||
+        typeof input.farmerName !== "string" || !input.farmerName.trim() || input.farmerName.length > 200 ||
+        !Number.isFinite(Number(input.areaHa)) || Number(input.areaHa) <= 0 || !validDate ||
+        !validCoordinates || (input.notes != null && typeof input.notes !== "string") ||
+        !["Direct Seeding", "Transplanting"].includes(input.plantingMethod) ||
+        !["draft", "submitted"].includes(input.status) && req.user.role === "field_officer") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "Valid barangay, crop, farmer, positive area, planting date, method, and status are required" });
+    }
+
+    const references = await client.query(
+      `SELECT b.id AS barangay_id, c.id AS crop_type_id, c.average_yield_kg_ha, m.maturity_days
+       FROM barangays b CROSS JOIN crop_types c
+       JOIN municipalities municipality ON municipality.id = b.municipality_id
+       JOIN crop_maturity_periods m ON m.crop_type_id = c.id
+       WHERE b.name = ? AND c.name = ? AND municipality.name = 'Boac'`,
+      [input.barangayName.trim(), input.cropName.trim()],
+    );
+    if (!references.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "The selected Boac barangay or crop type was not found" });
+    }
+    const farmer = input.farmerName.trim() === current.farmer_name
+      ? { rows: [{ id: current.farmer_id }] }
+      : await client.query("INSERT INTO farmers (name) VALUES (?)", [input.farmerName.trim()]);
+    const farmerId = farmer.insertId ?? farmer.rows[0].id;
+    await client.query(
+      `UPDATE field_reports SET barangay_id = ?, crop_type_id = ?, farmer_id = ?,
+        area_ha = ?, planting_date = ?, planting_method = ?, latitude = ?, longitude = ?,
+        notes = ?, status = ?
+       WHERE id = ?`,
+      [references.rows[0].barangay_id, references.rows[0].crop_type_id, farmerId,
+        Number(input.areaHa), input.plantingDate, input.plantingMethod, input.latitude ?? null,
+        input.longitude ?? null, input.notes ?? null, input.status, reportId],
+    );
+    await client.query(
+      `INSERT INTO harvest_schedules (field_report_id, expected_harvest_date, expected_harvest_kg)
+       VALUES (?,?,?)
+       ON DUPLICATE KEY UPDATE
+         expected_harvest_date = VALUES(expected_harvest_date),
+         expected_harvest_kg = VALUES(expected_harvest_kg)`,
+      [reportId, estimatedHarvestDate(input.plantingDate, references.rows[0].maturity_days),
+        expectedHarvest(input.areaHa, references.rows[0].average_yield_kg_ha)],
+    );
+    await client.query("COMMIT");
+    const { rows } = await pool.query("SELECT * FROM field_reports WHERE id = ?", [reportId]);
+    res.json(rows[0]);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    next(error);
+  } finally {
+    await releaseClient(client);
+  }
+});
+
+app.delete("/api/reports/:id", requireAuth, async (req, res, next) => {
+  const reportId = req.params.id;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(reportId)) {
+    return res.status(400).json({ error: "A valid report identifier is required" });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET @app_user_id = ?", [req.user.sub]);
+    const result = await client.query(
+      `DELETE FROM field_reports
+       WHERE id = ?
+         AND (? <> 'field_officer' OR (submitted_by = ? AND status IN ('draft','submitted')))`,
+      [reportId, req.user.role, req.user.sub],
+    );
+    if (!result.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Report not found" });
+    }
+    await client.query("COMMIT");
+    res.json({ id: reportId, deleted: true });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    next(error);
+  } finally {
+    await releaseClient(client);
   }
 });
 
@@ -172,31 +342,49 @@ app.post("/api/users", requireAuth, allowRoles("admin"), async (req, res, next) 
   }
   try {
     const passwordHash = await bcrypt.hash(password, 12);
+    const id = randomUUID();
+    await pool.query(
+      "INSERT INTO users (id, name, email, role, password_hash) VALUES (?,?,?,?,?)",
+      [id, name, email, role, passwordHash],
+    );
     const { rows } = await pool.query(
-      `INSERT INTO users (name, email, role, password_hash) VALUES ($1,$2,$3,$4)
-       RETURNING id, name, email, role, is_active, created_at`,
-      [name, email, role, passwordHash],
+      "SELECT id, name, email, role, is_active, created_at FROM users WHERE id = ?",
+      [id],
     );
     res.status(201).json(rows[0]);
   } catch (error) {
-    if (error.code === "23505") return res.status(409).json({ error: "A user with this email already exists" });
+    if (error.code === "ER_DUP_ENTRY") return res.status(409).json({ error: "A user with this email already exists" });
     next(error);
   }
 });
 
 app.patch("/api/reports/:id/review", requireAuth, allowRoles(...officerRoles), async (req, res, next) => {
   const { status, remarks = "" } = req.body;
-  if (!["approved", "rejected"].includes(status)) return res.status(400).json({ error: "Status must be approved or rejected" });
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.id) ||
+      !["approved", "rejected"].includes(status) || typeof remarks !== "string" || remarks.length > 2000) {
+    return res.status(400).json({ error: "A valid report ID, approved/rejected status, and remarks up to 2000 characters are required" });
+  }
+  const client = await pool.connect();
   try {
-    const { rows } = await pool.query(
-      `UPDATE field_reports SET status = $1, remarks = $2, reviewed_by = $3, reviewed_at = now()
-       WHERE id = $4 AND status = 'submitted' RETURNING *`,
-      [status, String(remarks).slice(0, 2000), req.user.sub, req.params.id],
+    await client.query("BEGIN");
+    await client.query("SET @app_user_id = ?", [req.user.sub]);
+    const result = await client.query(
+      `UPDATE field_reports SET status = ?, remarks = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND status = 'submitted'`,
+      [status, remarks, req.user.sub, req.params.id],
     );
-    if (!rows[0]) return res.status(404).json({ error: "Submitted report not found" });
+    if (!result.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Submitted report not found" });
+    }
+    await client.query("COMMIT");
+    const { rows } = await pool.query("SELECT * FROM field_reports WHERE id = ?", [req.params.id]);
     res.json(rows[0]);
   } catch (error) {
+    await client.query("ROLLBACK");
     next(error);
+  } finally {
+    await releaseClient(client);
   }
 });
 
@@ -204,17 +392,17 @@ app.get("/api/forecasts", requireAuth, async (req, res, next) => {
   try {
     const { rows } = await pool.query(
       `WITH approved AS (
-        SELECT r.barangay_id, r.crop_type_id, SUM(r.area_ha)::numeric AS total_area,
-          SUM(r.area_ha * c.average_yield_kg_ha)::numeric AS expected_harvest,
-          MIN(r.planting_date + m.maturity_days) AS first_harvest,
-          MAX(r.planting_date + m.maturity_days) AS last_harvest
+        SELECT r.barangay_id, r.crop_type_id, SUM(r.area_ha) AS total_area,
+          SUM(r.area_ha * c.average_yield_kg_ha) AS expected_harvest,
+          MIN(DATE_ADD(r.planting_date, INTERVAL m.maturity_days DAY)) AS first_harvest,
+          MAX(DATE_ADD(r.planting_date, INTERVAL m.maturity_days DAY)) AS last_harvest
         FROM field_reports r JOIN crop_types c ON c.id = r.crop_type_id
         JOIN crop_maturity_periods m ON m.crop_type_id = c.id
         WHERE r.status = 'approved' GROUP BY r.barangay_id, r.crop_type_id
       )
       SELECT b.id AS barangay_id, b.name AS barangay_name, c.id AS crop_type_id, c.name AS crop_name,
         COALESCE(a.total_area,0) AS total_area_ha, COALESCE(a.expected_harvest,0) AS expected_harvest_kg,
-        (municipality.population * c.per_capita_kg_year / 52.0)::numeric AS weekly_demand_kg,
+        (municipality.population * c.per_capita_kg_year / 52.0) AS weekly_demand_kg,
         a.first_harvest, a.last_harvest,
         CASE WHEN COALESCE(a.expected_harvest,0) > (municipality.population * c.per_capita_kg_year / 52.0) THEN 'oversupply'
              WHEN COALESCE(a.expected_harvest,0) < (municipality.population * c.per_capita_kg_year / 52.0) THEN 'shortage'
@@ -275,9 +463,10 @@ app.get("/api/recommendations", requireAuth, async (_req, res, next) => {
       for (const neighbor of plan) {
         await pool.query(
           `INSERT INTO recommendations (crop_type_id, source_barangay_id, target_municipality_id, surplus_kg, recommended_kg)
-           VALUES ($1,$2,$3,$4,$5)
-           ON CONFLICT (crop_type_id, source_barangay_id, target_municipality_id)
-           DO UPDATE SET surplus_kg = EXCLUDED.surplus_kg, recommended_kg = EXCLUDED.recommended_kg`,
+           VALUES (?,?,?,?,?)
+           ON DUPLICATE KEY UPDATE
+             surplus_kg = VALUES(surplus_kg),
+             recommended_kg = VALUES(recommended_kg)`,
           [crop.crop_type_id, crop.source_barangay_id, neighbor.municipality_id, totalSurplus, neighbor.recommended_kg],
         );
       }
@@ -296,25 +485,36 @@ app.get("/api/recommendations", requireAuth, async (_req, res, next) => {
 
 app.patch("/api/recommendations/:id", requireAuth, allowRoles(...officerRoles), async (req, res, next) => {
   const { status } = req.body;
-  if (!["accepted", "declined", "completed"].includes(status)) {
-    return res.status(400).json({ error: "Status must be accepted, declined, or completed" });
+  if (!/^\d+$/.test(req.params.id) || !["accepted", "declined", "completed"].includes(status)) {
+    return res.status(400).json({ error: "A valid recommendation ID and status are required" });
   }
+  const client = await pool.connect();
   try {
-    const { rows } = await pool.query(
-      "UPDATE recommendations SET status = $1 WHERE id = $2 RETURNING *",
+    await client.query("BEGIN");
+    await client.query("SET @app_user_id = ?", [req.user.sub]);
+    const result = await client.query(
+      "UPDATE recommendations SET status = ? WHERE id = ?",
       [status, req.params.id],
     );
-    if (!rows[0]) return res.status(404).json({ error: "Recommendation not found" });
+    if (!result.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Recommendation not found" });
+    }
+    await client.query("COMMIT");
+    const { rows } = await pool.query("SELECT * FROM recommendations WHERE id = ?", [req.params.id]);
     res.json(rows[0]);
   } catch (error) {
+    await client.query("ROLLBACK");
     next(error);
+  } finally {
+    await releaseClient(client);
   }
 });
 
 app.get("/api/notifications", requireAuth, async (req, res, next) => {
   try {
     const { rows } = await pool.query(
-      "SELECT * FROM notifications WHERE recipient_role = $1 OR $2 = 'admin' ORDER BY created_at DESC LIMIT 100",
+      "SELECT * FROM notifications WHERE recipient_role = ? OR ? = 'admin' ORDER BY created_at DESC LIMIT 100",
       [req.user.role, req.user.role],
     );
     res.json(rows);
@@ -326,10 +526,10 @@ app.get("/api/notifications", requireAuth, async (req, res, next) => {
 app.get("/api/summary", requireAuth, async (_req, res, next) => {
   try {
     const { rows } = await pool.query(
-      `SELECT COUNT(*) FILTER (WHERE status='submitted')::int AS pending_reviews,
-        COUNT(*) FILTER (WHERE status='approved')::int AS approved_reports,
-        COALESCE(SUM(area_ha) FILTER (WHERE status='approved'),0)::numeric AS planted_area_ha,
-        COALESCE(SUM(area_ha * c.average_yield_kg_ha) FILTER (WHERE status='approved'),0)::numeric AS forecast_kg
+      `SELECT COALESCE(SUM(status = 'submitted'), 0) AS pending_reviews,
+        COALESCE(SUM(status = 'approved'), 0) AS approved_reports,
+        COALESCE(SUM(IF(status = 'approved', area_ha, 0)), 0) AS planted_area_ha,
+        COALESCE(SUM(IF(status = 'approved', area_ha * c.average_yield_kg_ha, 0)), 0) AS forecast_kg
        FROM field_reports r JOIN crop_types c ON c.id = r.crop_type_id`,
     );
     res.json(rows[0]);
@@ -348,17 +548,18 @@ async function start() {
     throw new Error("JWT_SECRET must be set to at least 24 characters");
   }
   await initializeDatabase();
+  dataChanges = createDataChangeFeed(pool);
   const demoPassword = process.env.DEMO_PASSWORD || "BoacDemo123!";
   const passwordHash = await bcrypt.hash(demoPassword, 12);
   for (const role of roles) {
     const email = `${role}@boac.gov.ph`;
     const name = role.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
     await pool.query(
-      `INSERT INTO users (name,email,role,password_hash) VALUES ($1,$2,$3,$4)
-       ON CONFLICT (email) DO NOTHING`,
-      [name, email, role, passwordHash],
+      `INSERT IGNORE INTO users (id,name,email,role,password_hash) VALUES (?,?,?,?,?)`,
+      [randomUUID(), name, email, role, passwordHash],
     );
   }
+  await seedDatabase();
   await generateHarvestAlerts();
   setInterval(() => generateHarvestAlerts().catch((error) => console.error("Harvest alert generation failed:", error)), 60 * 60 * 1000).unref();
   app.listen(port, () => console.log(`Crop Supply API listening on http://localhost:${port}`));
@@ -367,7 +568,7 @@ async function start() {
 async function generateHarvestAlerts() {
   const { rows } = await pool.query(
     `SELECT r.id, b.name AS barangay_name, c.name AS crop_name,
-      r.planting_date + m.maturity_days AS harvest_date,
+      DATE_ADD(r.planting_date, INTERVAL m.maturity_days DAY) AS harvest_date,
       r.area_ha * c.average_yield_kg_ha AS harvest_kg,
       municipality.population * c.per_capita_kg_year / 52.0 AS weekly_demand_kg
      FROM field_reports r
@@ -376,7 +577,8 @@ async function generateHarvestAlerts() {
      JOIN crop_types c ON c.id = r.crop_type_id
      JOIN crop_maturity_periods m ON m.crop_type_id = c.id
      WHERE r.status = 'approved'
-       AND r.planting_date + m.maturity_days BETWEEN CURRENT_DATE + 14 AND CURRENT_DATE + 21`,
+       AND DATE_ADD(r.planting_date, INTERVAL m.maturity_days DAY)
+         BETWEEN DATE_ADD(CURRENT_DATE, INTERVAL 14 DAY) AND DATE_ADD(CURRENT_DATE, INTERVAL 21 DAY)`,
   );
   for (const report of rows) {
     const risk = supplyStatus(report.harvest_kg, report.weekly_demand_kg);
@@ -384,7 +586,7 @@ async function generateHarvestAlerts() {
     for (const recipientRole of ["municipal_officer", "provincial_officer"]) {
       await pool.query(
         `INSERT INTO notifications (dedupe_key, recipient_role, title, message, risk_status)
-         VALUES ($1,$2,$3,$4,$5) ON CONFLICT (dedupe_key) DO NOTHING`,
+         VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE dedupe_key = dedupe_key`,
         [`harvest:${report.id}:${recipientRole}`, recipientRole, `${report.crop_name} harvest in ${days} days`,
           `${report.crop_name} · ${report.barangay_name} · ${new Date(report.harvest_date).toLocaleDateString("en-CA")} · ${Math.round(Number(report.harvest_kg)).toLocaleString()} kg · ${risk}`,
           risk],

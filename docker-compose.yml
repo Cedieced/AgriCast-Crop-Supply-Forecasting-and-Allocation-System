@@ -1,18 +1,20 @@
 services:
   db:
-    image: postgres:16-alpine
+    image: mysql:8.4
     environment:
-      POSTGRES_DB: crop_supply
-      POSTGRES_USER: cropapp
-      POSTGRES_PASSWORD: cropapp
+      MYSQL_ROOT_PASSWORD: mysqlroot
+      MYSQL_DATABASE: crop_supply
+      MYSQL_USER: cropapp
+      MYSQL_PASSWORD: cropapp
     ports:
-      - "5432:5432"
+      - "3306:3306"
     volumes:
-      - crop_supply_data:/var/lib/postgresql/data
+      - crop_supply_mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cropapp -d crop_supply"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
+
 volumes:
-  crop_supply_data:
+  crop_supply_mysql_data:

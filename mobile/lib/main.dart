@@ -148,7 +148,7 @@ class FieldApi {
           'Login timed out. Check that the API is running at $apiBaseUrl.');
     } on http.ClientException {
       throw Exception(
-          'Cannot reach the login API at $apiBaseUrl. Start the API and PostgreSQL, then try again.');
+          'Cannot reach the login API at $apiBaseUrl. Check that the API and MySQL are running and that the API MySQL credentials are configured.');
     }
     if (response.statusCode != 200) {
       final body = jsonDecode(response.body);
@@ -174,8 +174,45 @@ class FieldApi {
         'Content-Type': 'application/json',
         'Authorization': 'Bearer $token'
       },
-      body: jsonEncode({
-        'clientReportId': report['id'],
+      body: jsonEncode(_reportBody(report)..['clientReportId'] = report['id']),
+    );
+    if (response.statusCode != 200 && response.statusCode != 201) {
+      throw Exception(
+          jsonDecode(response.body)['error'] ?? 'Report sync failed');
+    }
+  }
+
+  Future<void> updateReport(Map<String, Object?> report) async {
+    final token = await storage.read(key: 'jwt');
+    if (token == null) throw Exception('Please sign in again before syncing.');
+    final response = await client.put(
+      Uri.parse('$apiBaseUrl/reports/${report['id']}'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': '******'
+      },
+      body: jsonEncode(_reportBody(report)),
+    );
+    if (response.statusCode != 200) {
+      throw Exception(
+          jsonDecode(response.body)['error'] ?? 'Report update failed');
+    }
+  }
+
+  Future<void> deleteReport(String reportId) async {
+    final token = await storage.read(key: 'jwt');
+    if (token == null) throw Exception('Please sign in again before syncing.');
+    final response = await client.delete(
+      Uri.parse('$apiBaseUrl/reports/$reportId'),
+      headers: {'Authorization': '******'},
+    );
+    if (response.statusCode != 200) {
+      throw Exception(
+          jsonDecode(response.body)['error'] ?? 'Report deletion failed');
+    }
+  }
+
+  Map<String, Object?> _reportBody(Map<String, Object?> report) => {
         'barangayName': report['barangay_name'],
         'cropName': report['crop_name'],
         'farmerName': report['farmer_name'],
@@ -185,13 +222,7 @@ class FieldApi {
         'latitude': report['latitude'],
         'longitude': report['longitude'],
         'status': report['status'],
-      }),
-    );
-    if (response.statusCode != 200 && response.statusCode != 201) {
-      throw Exception(
-          jsonDecode(response.body)['error'] ?? 'Report sync failed');
-    }
-  }
+      };
 }
 
 void main() {
@@ -386,13 +417,15 @@ class _FieldHomeState extends State<FieldHome> {
     subscription = Connectivity().onConnectivityChanged.listen((results) {
       final connected = results.any((item) => item != ConnectivityResult.none);
       if (mounted) setState(() => online = connected);
-      if (connected) syncQueued();
+      if (connected && mounted) syncQueued();
     });
     Connectivity().checkConnectivity().then((results) {
+      final connected =
+          results.any((item) => item != ConnectivityResult.none);
       if (mounted) {
-        setState(() =>
-            online = results.any((item) => item != ConnectivityResult.none));
+        setState(() => online = connected);
       }
+      if (connected) syncQueued();
     });
   }
 
