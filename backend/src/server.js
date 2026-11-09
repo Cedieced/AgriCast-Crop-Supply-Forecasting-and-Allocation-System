@@ -6,7 +6,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { pool, initializeDatabase, seedDatabase } from "./db.js";
 import { requireAuth, allowRoles } from "./auth.js";
-import { allocationPlan, estimatedHarvestDate, expectedHarvest, supplyStatus } from "./domain.js";
+import { allocationPlan, estimatedHarvestDate, expectedHarvest, riskStatus, supplyStatus, validateCropInput } from "./domain.js";
 import { createDataChangeFeed } from "./realtime.js";
 
 const app = express();
@@ -27,7 +27,7 @@ async function releaseClient(client) {
 
 app.use(helmet());
 app.use(cors({
-  origin: (process.env.WEB_ORIGIN || "http://localhost:5173,http://localhost:5174,http://127.0.0.1:5174").split(",").map((origin) => origin.trim()),
+  origin: (process.env.WEB_ORIGIN || "http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,http://127.0.0.1:5174").split(",").map((origin) => origin.trim()),
 }));
 
 app.use((req, res, next) => {
@@ -135,13 +135,104 @@ app.get("/api/crops", requireAuth, async (_req, res, next) => {
   }
 });
 
+app.post("/api/crops", requireAuth, async (req, res, next) => {
+  let crop;
+  try {
+    crop = validateCropInput(req.body);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET @app_user_id = ?", [req.user.sub]);
+    const created = await client.query(
+      "INSERT INTO crop_types (name, average_yield_kg_ha, per_capita_kg_year) VALUES (?,?,?)",
+      [crop.name, crop.averageYieldKgHa, crop.perCapitaKgYear],
+    );
+    await client.query(
+      "INSERT INTO crop_maturity_periods (crop_type_id, maturity_days) VALUES (?,?)",
+      [created.insertId, crop.maturityDays],
+    );
+    await client.query("COMMIT");
+    res.status(201).json({
+      id: created.insertId,
+      name: crop.name,
+      average_yield_kg_ha: crop.averageYieldKgHa,
+      per_capita_kg_year: crop.perCapitaKgYear,
+      maturity_days: crop.maturityDays,
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    if (error.code === "ER_DUP_ENTRY") {
+      return res.status(409).json({ error: "That crop type already exists" });
+    }
+    next(error);
+  } finally {
+    await releaseClient(client);
+  }
+});
+
+app.put("/api/crops/:id", requireAuth, async (req, res, next) => {
+  const cropId = Number(req.params.id);
+  if (!Number.isSafeInteger(cropId) || cropId <= 0) {
+    return res.status(400).json({ error: "A valid crop ID is required" });
+  }
+
+  let crop;
+  try {
+    crop = validateCropInput(req.body);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET @app_user_id = ?", [req.user.sub]);
+    const existing = await client.query("SELECT id FROM crop_types WHERE id = ?", [cropId]);
+    if (!existing.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Crop type not found" });
+    }
+
+    await client.query(
+      "UPDATE crop_types SET name = ?, average_yield_kg_ha = ?, per_capita_kg_year = ? WHERE id = ?",
+      [crop.name, crop.averageYieldKgHa, crop.perCapitaKgYear, cropId],
+    );
+    await client.query(
+      "UPDATE crop_maturity_periods SET maturity_days = ? WHERE crop_type_id = ?",
+      [crop.maturityDays, cropId],
+    );
+    await client.query("COMMIT");
+    res.json({
+      id: cropId,
+      name: crop.name,
+      average_yield_kg_ha: crop.averageYieldKgHa,
+      per_capita_kg_year: crop.perCapitaKgYear,
+      maturity_days: crop.maturityDays,
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    if (error.code === "ER_DUP_ENTRY") {
+      return res.status(409).json({ error: "That crop type already exists" });
+    }
+    next(error);
+  } finally {
+    await releaseClient(client);
+  }
+});
+
 app.get("/api/reports", requireAuth, async (req, res, next) => {
   try {
     const status = req.query.status ? String(req.query.status) : null;
     const { rows } = await pool.query(
-      `SELECT r.*, b.name AS barangay_name, c.name AS crop_name, u.name AS farmer_name
+      `SELECT r.*, b.name AS barangay_name, c.name AS crop_name, u.name AS farmer_name,
+        maturity.maturity_days
        FROM field_reports r JOIN barangays b ON b.id = r.barangay_id
-       JOIN crop_types c ON c.id = r.crop_type_id JOIN farmers u ON u.id = r.farmer_id
+       JOIN crop_types c ON c.id = r.crop_type_id JOIN crop_maturity_periods maturity ON maturity.crop_type_id = c.id
+       JOIN farmers u ON u.id = r.farmer_id
        WHERE (? IS NULL OR r.status = ?)
          AND (? <> 'field_officer' OR r.submitted_by = ?)
        ORDER BY r.created_at DESC`,
@@ -437,22 +528,20 @@ app.get("/api/forecasts", requireAuth, async (req, res, next) => {
       )
       SELECT b.id AS barangay_id, b.name AS barangay_name, c.id AS crop_type_id, c.name AS crop_name,
         COALESCE(a.total_area,0) AS total_area_ha, COALESCE(a.expected_harvest,0) AS expected_harvest_kg,
-        (municipality.population * c.per_capita_kg_year / 52.0) AS weekly_demand_kg,
+        (b.population * c.per_capita_kg_year / 52.0) AS weekly_demand_kg,
         a.first_harvest, a.last_harvest,
-        CASE WHEN COALESCE(a.expected_harvest,0) > (municipality.population * c.per_capita_kg_year / 52.0) THEN 'oversupply'
-             WHEN COALESCE(a.expected_harvest,0) < (municipality.population * c.per_capita_kg_year / 52.0) THEN 'shortage'
+        CASE WHEN COALESCE(a.expected_harvest,0) > (b.population * c.per_capita_kg_year / 52.0) THEN 'oversupply'
+             WHEN COALESCE(a.expected_harvest,0) < (b.population * c.per_capita_kg_year / 52.0) THEN 'shortage'
              ELSE 'balanced' END AS supply_status,
-        CASE WHEN COALESCE(a.expected_harvest,0) = (municipality.population * c.per_capita_kg_year / 52.0) THEN 'green'
-             WHEN municipality.population * c.per_capita_kg_year = 0
-               OR ABS(COALESCE(a.expected_harvest,0) - (municipality.population * c.per_capita_kg_year / 52.0))
-                  >= (municipality.population * c.per_capita_kg_year / 52.0) * 0.25 THEN 'red'
-             ELSE 'yellow' END AS risk_status
       FROM barangays b JOIN municipalities municipality ON municipality.id = b.municipality_id
       CROSS JOIN crop_types c
       LEFT JOIN approved a ON a.barangay_id = b.id AND a.crop_type_id = c.id
       ORDER BY b.name,c.name`,
     );
-    res.json(rows);
+    res.json(rows.map((row) => ({
+      ...row,
+      risk_status: riskStatus(row.expected_harvest_kg, row.weekly_demand_kg),
+    })));
   } catch (error) {
     next(error);
   }

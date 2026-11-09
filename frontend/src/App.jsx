@@ -31,7 +31,7 @@ function downloadFile(blob, filename) {
 }
 
 function StatusBadge({ status }) {
-  const labels = { approved: "Approved", submitted: "For review", rejected: "Rejected", draft: "Draft", oversupply: "Surplus", shortage: "Shortage", balanced: "Balanced", green: "Low risk", yellow: "Watch", red: "High risk" };
+  const labels = { approved: "Approved", submitted: "For review", rejected: "Rejected", draft: "Draft", oversupply: "Surplus", shortage: "Shortage", balanced: "Balanced", green: "Low risk", yellow: "Moderate risk", red: "High risk", none: "No data" };
   return <span className={`badge badge-${status}`}>{labels[status] || status}</span>;
 }
 
@@ -70,9 +70,31 @@ function riskForForecast(row) {
   if (row.risk_status) return row.risk_status;
   const supply = Number(row.expected_harvest_kg ?? row.supply ?? 0);
   const demand = Number(row.weekly_demand_kg ?? row.demand ?? 0);
-  if (supply === demand) return "green";
-  if (demand === 0 || Math.abs(supply - demand) >= demand * 0.25) return "red";
-  return "yellow";
+  if (demand === 0) return supply === 0 ? "green" : "red";
+  if (supply === 0) return "red";
+  const relativeDifference = Math.abs(supply - demand) / demand;
+  if (relativeDifference <= 0.25) return "green";
+  if (relativeDifference <= 1) return "yellow";
+  return "red";
+}
+
+function primaryForecastForBarangay(rows) {
+  return rows
+    .filter((row) => Number(row.total_area_ha ?? row.area ?? 0) > 0)
+    .sort((left, right) =>
+      Number(right.total_area_ha ?? right.area ?? 0) -
+      Number(left.total_area_ha ?? left.area ?? 0))[0];
+}
+
+function mapCrop(item) {
+  return {
+    id: item.id,
+    name: item.name,
+    yield: Number(item.average_yield_kg_ha),
+    maturity: Number(item.maturity_days),
+    demandPerPerson: Number(item.per_capita_kg_year ?? item.demandPerPerson ?? 0),
+    color: crops.find((crop) => crop.name === item.name)?.color || "#39834c",
+  };
 }
 
 function MapPanel({ onSelect, selected, compact = false, forecasts = [], locations = [], boundaries = [], reports = [], debug = false }) {
@@ -133,9 +155,9 @@ function MapPanel({ onSelect, selected, compact = false, forecasts = [], locatio
         console.error(`Skipping ${name}: validated coordinates are outside its barangay boundary.`, { latitude, longitude });
         continue;
       }
-      const rows = forecasts.filter((item) => item.barangay_name === name);
-      const order = { red: 0, yellow: 1, green: 2 };
-      const risk = rows.map(riskForForecast).sort((a, b) => order[a] - order[b])[0] || "green";
+      const rows = forecasts.filter((item) => (item.barangay_name || item.barangay) === name);
+      const primaryForecast = primaryForecastForBarangay(rows);
+      const risk = primaryForecast ? riskForForecast(primaryForecast) : "none";
       const icon = L.divIcon({ className: "map-marker-wrap", html: `<span class="map-marker marker-${risk}"></span>`, iconSize: [15, 15], iconAnchor: [7, 7] });
       const marker = L.marker([latitude, longitude], { icon }).addTo(map);
       marker.bindTooltip(debug ? `${name} · ${latitude.toFixed(5)}, ${longitude.toFixed(5)} · contained · ${coordinateSource}` : name, { direction: "top", offset: [0, -6] });
@@ -155,13 +177,72 @@ function MetricCard({ label, value, unit, change, icon: Icon, tone }) {
   return <article className="metric-card"><div className={`metric-icon ${tone}`}><Icon size={18} /></div><div className="metric-label">{label}</div><div className="metric-value">{value}<small>{unit}</small></div><div className="metric-foot"><span className={change.startsWith("+") ? "trend-up" : "trend-neutral"}>{change.startsWith("+") ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}{change}</span><span>vs last month</span></div></article>;
 }
 
-function MiniBars() {
-  const values = [32, 46, 38, 58, 52, 72, 64, 82, 58, 74, 92, 76];
-  return <div className="mini-chart" role="img" aria-label="Monthly crop harvest forecast trend">
-    <div className="chart-grid"><span>40k</span><span>30k</span><span>20k</span><span>10k</span></div>
-    <div className="chart-bars">{values.map((height, i) => <div key={i} className={`chart-bar ${i === 10 ? "chart-highlight" : ""}`} style={{ height: `${height}%` }} title={`${height * 500} kg forecast`} />)}</div>
-    <div className="chart-labels"><span>Jan</span><span>Mar</span><span>May</span><span>Jul</span><span>Sep</span><span>Nov</span></div>
-  </div>;
+function HarvestOutlook({ forecasts, reports }) {
+  const [cropFilter, setCropFilter] = useState("all");
+  const [monthOffset, setMonthOffset] = useState(0);
+  const cropNames = [...new Set(forecasts.map((item) => item.crop_name || item.crop).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right));
+  const start = new Date();
+  start.setDate(1);
+  start.setMonth(start.getMonth() + monthOffset);
+  const monthlyTotals = Array.from({ length: 12 }, (_, index) => {
+    const date = new Date(start.getFullYear(), start.getMonth() + index, 1);
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+    const projected = reports.reduce((sum, row) => {
+      if (row.status !== "approved") return sum;
+      if (cropFilter !== "all" && row.crop !== cropFilter) return sum;
+      const harvestDate = row.harvestDate;
+      if (!harvestDate || harvestDate.slice(0, 7) !== key) return sum;
+      return sum + Number(row.volume || 0);
+    }, 0);
+    return {
+      key,
+      label: date.toLocaleDateString("en-PH", { month: "short" }),
+      title: date.toLocaleDateString("en-PH", { month: "long", year: "numeric" }),
+      projected,
+    };
+  });
+  const maxValue = Math.max(1, ...monthlyTotals.map((item) => item.projected));
+  const totalProjected = monthlyTotals.reduce((sum, item) => sum + item.projected, 0);
+  const selectedMonth = monthlyTotals[0];
+  const windowEnd = new Date(start.getFullYear(), start.getMonth() + 11, 1);
+  const windowLabel = `${start.toLocaleDateString("en-PH", { month: "short", year: "numeric" })} – ${windowEnd.toLocaleDateString("en-PH", { month: "short", year: "numeric" })}`;
+
+  return <article className="panel harvest-panel">
+    <div className="panel-heading harvest-heading">
+      <div><h2>Harvest outlook</h2><p className="muted">Monthly harvest projection · {windowLabel}</p></div>
+      <label className="harvest-filter">
+        <span className="sr-only">Filter harvest outlook by crop</span>
+        <select className="select-button" value={cropFilter} onChange={(event) => setCropFilter(event.target.value)}>
+          <option value="all">All crops</option>
+          {cropNames.map((crop) => <option key={crop} value={crop}>{crop}</option>)}
+        </select>
+        <ChevronDown size={14} aria-hidden="true" />
+      </label>
+    </div>
+    <div className="chart-legend">
+      <span><i className="legend-dot green-dot" /> Projected harvest (kg)</span>
+    </div>
+    {cropNames.length ? <div className="harvest-chart-scroll" role="region" aria-label={`Monthly projected harvest in kilograms, ${cropFilter === "all" ? "all crops" : cropFilter}`} tabIndex={0}>
+      <div className="harvest-chart">
+        {monthlyTotals.map((item, index) => <div className={`harvest-chart-group ${index === 0 ? "harvest-chart-current" : ""}`} key={item.key}>
+          <strong className="harvest-chart-value" title={`${formatNumber(item.projected)} kg`}>{item.projected ? `${(item.projected / 1000).toLocaleString("en-PH", { maximumFractionDigits: 1 })}k` : "—"}</strong>
+          <div className="harvest-chart-bars">
+            <div className="harvest-chart-bar forecast-bar" style={{ height: `${item.projected ? Math.max(3, item.projected / maxValue * 100) : 0}%` }} title={`${item.title}: ${formatNumber(item.projected)} kg projected`} />
+          </div>
+          <span className="harvest-chart-label" title={item.title}>{item.label}</span>
+        </div>)}
+      </div>
+    </div> : <p className="harvest-empty">No crop forecasts are available.</p>}
+    <div className="harvest-month-controls">
+      <button className="text-button" type="button" onClick={() => setMonthOffset((value) => value - 12)} aria-label="Show previous 12 months">Previous 12 months</button>
+      <button className="text-button" type="button" onClick={() => setMonthOffset((value) => value + 12)} aria-label="Show next 12 months">Next 12 months</button>
+    </div>
+    <div className="chart-caption" aria-live="polite">
+      Total projected harvest in this 12-month outlook: <strong>{formatNumber(totalProjected)} kg</strong>
+      <span>{selectedMonth.title}: {formatNumber(selectedMonth.projected)} kg projected</span>
+    </div>
+  </article>;
 }
 
 function DashboardHome({ reports, forecasts, locations, boundaries, selectedBarangay, setSelectedBarangay, setPage }) {
@@ -179,7 +260,7 @@ function DashboardHome({ reports, forecasts, locations, boundaries, selectedBara
       <MetricCard label="Barangays reporting" value="48" unit="/ 61" change="+6 this month" icon={Users} tone="purple" />
     </section>
     <section className="overview-grid">
-      <article className="panel harvest-panel"><div className="panel-heading"><div><h2>Harvest outlook</h2><p className="muted">Projected crop volume · this season</p></div><button className="select-button">All crops <ChevronDown size={14} /></button></div><div className="chart-legend"><span><i className="legend-dot green-dot" /> Forecast harvest</span><span><i className="legend-line" /> Market demand</span><b>Nov 2026</b></div><MiniBars /><div className="chart-caption">Supply is tracking <strong>14% above</strong> seasonal demand <span>+5,840 kg vs target</span></div></article>
+      <HarvestOutlook forecasts={forecasts} reports={reports} />
       <article className="panel map-panel"><div className="panel-heading"><div><h2>Production by barangay</h2><p className="muted">Live crop activity across Boac</p></div><button className="icon-button" aria-label="Open full map" onClick={() => setPage("Map view")}><ArrowUpRight size={17} /></button></div><MapPanel compact forecasts={forecasts} reports={reports} locations={locations} boundaries={boundaries} onSelect={setSelectedBarangay} selected={selectedBarangay} /><div className="map-legend"><span><i className="legend-dot green-dot" /> Demand met</span><span><i className="legend-dot yellow-dot" /> Watch</span><span><i className="legend-dot red-dot" /> Significant risk</span><small>{boundaries.length ? "Markers are shown only inside their matched barangay boundary." : "Map markers hidden until verified barangay boundaries are installed."}</small><button onClick={() => setPage("Map view")}>Explore map <ChevronRight size={13} /></button></div></article>
     </section>
     <section className="overview-grid bottom-grid">
@@ -223,19 +304,18 @@ function ForecastPage({ forecasts, onExport }) {
 }
 
 function MapPage({ selected, setSelected, forecasts, locations, boundaries, boundaryStatus, reloadBoundaries, reports }) {
-  const row = (forecasts?.length ? forecasts : forecastRows())
-    .filter((item) => (item.barangay_name || item.barangay) === selected)
-    .sort((a, b) => Number(b.expected_harvest_kg ?? b.supply ?? 0) - Number(a.expected_harvest_kg ?? a.supply ?? 0))[0];
-  const expectedSupply = Number(row?.expected_harvest_kg ?? row?.supply ?? 37800);
-  const localDemand = Number(row?.weekly_demand_kg ?? row?.demand ?? 12780);
+  const row = primaryForecastForBarangay((forecasts?.length ? forecasts : forecastRows())
+    .filter((item) => (item.barangay_name || item.barangay) === selected));
+  const expectedSupply = Number(row?.expected_harvest_kg ?? row?.supply ?? 0);
+  const localDemand = Number(row?.weekly_demand_kg ?? row?.demand ?? 0);
   const projectedDifference = expectedSupply - localDemand;
   return <div className="page-content">
     <div className="page-heading"><div><p className="eyebrow">GEOGRAPHIC INTELLIGENCE</p><h1>Boac crop map</h1><p className="muted">Explore farm activity and crop supply outlook by barangay.</p></div><div className="map-date-chip"><span className="online-dot" /> 61 barangays <span>·</span> Live overview</div></div>
     {!boundaries.length && boundaryStatus === "loading" && <div className="info-banner" role="status">Loading the Boac barangay boundary layer...</div>}
     {!boundaries.length && boundaryStatus !== "loading" && <div className="info-banner" role="status">No verified Boac barangay boundary layer is installed. Map nodes are hidden to avoid misleading placement. Add the official GeoJSON at <code>/data/boac-barangay-boundaries.geojson</code> and reload the layer.</div>}
     {boundaryStatus === "error" && <div className="error-box" role="alert">The barangay boundary GeoJSON could not be loaded or is invalid.</div>}
-    <div className="map-layout"><article className="panel map-main"><MapPanel forecasts={forecasts} locations={locations} boundaries={boundaries} reports={reports} debug={import.meta.env.DEV && new URLSearchParams(window.location.search).has("mapDebug")} onSelect={setSelected} selected={selected} /><div className="map-legend map-legend-full"><span><i className="legend-dot green-dot" /> Demand met</span><span><i className="legend-dot yellow-dot" /> Potential imbalance</span><span><i className="legend-dot red-dot" /> Significant risk</span><small>{boundaries.length ? "Markers are containment-checked; generated representative points are barangay visualization locations, not farm GPS." : "No markers are rendered without barangay polygons and contained coordinates."}</small><button className="subtle-link" onClick={reloadBoundaries}>Reload GIS layer</button></div></article>
-      <aside className="panel barangay-details"><p className="eyebrow">SELECTED BARANGAY</p><h2>{selected}</h2><p className="muted">Boac Municipality · Marinduque</p><div className="detail-crop"><span className="crop-avatar">🌾</span><span><strong>{row?.crop_name || row?.crop || "Rice"}</strong><small>Primary forecast crop</small></span><StatusBadge status={row?.supply_status || row?.status || "oversupply"} /></div><div className="detail-stat"><span>Risk status</span><StatusBadge status={row ? riskForForecast(row) : "yellow"} /></div><div className="detail-stat"><span>Total planted area</span><strong>{Number(row?.total_area_ha ?? row?.area ?? 8.4).toFixed(1)} ha</strong></div><div className="detail-stat"><span>Expected harvest</span><strong>{formatNumber(expectedSupply)} kg</strong></div><div className="detail-stat"><span>Weekly market capacity</span><strong>{formatNumber(localDemand)} kg</strong></div><div className="detail-stat"><span>Projected {projectedDifference >= 0 ? "oversupply" : "shortage"}</span><strong>{formatNumber(Math.abs(projectedDifference))} kg</strong></div><div className="detail-stat"><span>Harvest period</span><strong>{row?.harvest || "Jul 18 – Aug 02"}</strong></div><div className="risk-note"><AlertTriangle size={16} /><span><strong>Supply forecast: {row?.supply_status || row?.status || "oversupply"}</strong><small>Recommendations account for projected supply and neighboring demand.</small></span></div><button className="button button-primary full-button">View barangay reports <ChevronRight size={15} /></button></aside>
+    <div className="map-layout"><article className="panel map-main"><MapPanel forecasts={forecasts} locations={locations} boundaries={boundaries} reports={reports} debug={import.meta.env.DEV && new URLSearchParams(window.location.search).has("mapDebug")} onSelect={setSelected} selected={selected} /><div className="map-legend map-legend-full"><span><i className="legend-dot green-dot" /> Low risk</span><span><i className="legend-dot yellow-dot" /> Moderate risk</span><span><i className="legend-dot red-dot" /> High risk</span><span><i className="legend-dot none-dot" /> No approved crop data</span><small>{boundaries.length ? "Marker risk reflects the most-planted approved crop in each barangay; demand is estimated from that barangay's population." : "No markers are rendered without barangay polygons and contained coordinates."}</small><button className="subtle-link" onClick={reloadBoundaries}>Reload GIS layer</button></div></article>
+      <aside className="panel barangay-details"><p className="eyebrow">SELECTED BARANGAY</p><h2>{selected}</h2><p className="muted">Boac Municipality · Marinduque</p><div className="detail-crop"><span className="crop-avatar">🌾</span><span><strong>{row?.crop_name || row?.crop || "No approved crops"}</strong><small>{row ? "Primary crop by planted area" : "No approved crop data"}</small></span><StatusBadge status={row?.supply_status || row?.status || "none"} /></div><div className="detail-stat"><span>Risk status</span><StatusBadge status={row ? riskForForecast(row) : "none"} /></div><div className="detail-stat"><span>Total planted area</span><strong>{Number(row?.total_area_ha ?? row?.area ?? 0).toFixed(1)} ha</strong></div><div className="detail-stat"><span>Expected harvest</span><strong>{formatNumber(expectedSupply)} kg</strong></div><div className="detail-stat"><span>Weekly market capacity</span><strong>{formatNumber(localDemand)} kg</strong></div><div className="detail-stat"><span>Projected {projectedDifference >= 0 ? "oversupply" : "shortage"}</span><strong>{formatNumber(Math.abs(projectedDifference))} kg</strong></div><div className="detail-stat"><span>Harvest period</span><strong>{row?.harvest || "—"}</strong></div><div className="risk-note"><AlertTriangle size={16} /><span><strong>Supply forecast: {row?.supply_status || row?.status || "No approved crop data"}</strong><small>Recommendations account for projected supply and neighboring demand.</small></span></div><button className="button button-primary full-button">View barangay reports <ChevronRight size={15} /></button></aside>
     </div>
   </div>;
 }
@@ -346,9 +426,53 @@ function ReportsExportPage({ reports, onExport }) {
   return <div className="page-content"><div className="page-heading"><div><p className="eyebrow">DATA & EXPORTS</p><h1>Reports</h1><p className="muted">Create decision-ready summaries for municipal and provincial planning.</p></div></div><div className="report-card-grid">{items.map(([title, detail, Icon, format]) => <article className="panel report-card" key={title}><span className="report-icon"><Icon size={19} /></span><h2>{title}</h2><p>{detail}</p><div className="report-card-footer"><span><span className="format-tag">{format.toUpperCase()}</span> {reports.length} field records</span><button className="icon-button" aria-label={`Download ${title}`} onClick={() => onExport(format)}><Download size={16} /></button></div></article>)}</div><div className="export-note"><ShieldCheck size={17} /><span>Exports reflect the current dashboard dataset. Review sensitive farmer information before sharing reports outside authorized offices.</span></div></div>;
 }
 
-function SettingsPage({ token, user }) {
+function CropCreateForm({ onSubmit, onCancel, onCreated, crop = null }) {
+  const [form, setForm] = useState(() => ({
+    name: crop?.name || "",
+    averageYieldKgHa: crop?.yield?.toString() || "",
+    perCapitaKgYear: crop?.demandPerPerson?.toString() || "0",
+    maturityDays: crop?.maturity?.toString() || "",
+  }));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      const crop = await onSubmit({
+        ...form,
+        averageYieldKgHa: Number(form.averageYieldKgHa),
+        perCapitaKgYear: Number(form.perCapitaKgYear),
+        maturityDays: Number(form.maturityDays),
+      });
+      onCreated?.(crop);
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <form className="crop-create-form" onSubmit={submit}>
+    {error && <div className="error-box" role="alert">{error}</div>}
+    <label>Crop name<input required maxLength="100" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
+    <label>Average yield (kg/ha)<input type="number" min="0.01" step="0.01" required value={form.averageYieldKgHa} onChange={(event) => setForm({ ...form, averageYieldKgHa: event.target.value })} /></label>
+    <label>Days to maturity<input type="number" min="1" max="3650" step="1" required value={form.maturityDays} onChange={(event) => setForm({ ...form, maturityDays: event.target.value })} /></label>
+    <label>Consumption (kg/person/year)<input type="number" min="0" step="0.01" required value={form.perCapitaKgYear} onChange={(event) => setForm({ ...form, perCapitaKgYear: event.target.value })} /></label>
+    <div className="crop-create-actions">
+      <button type="button" className="button button-light" onClick={onCancel} disabled={saving}>Cancel</button>
+      <button className="button button-primary" disabled={saving}>{saving ? "Saving..." : crop ? "Save changes" : "Add crop"}</button>
+    </div>
+  </form>;
+}
+
+function SettingsPage({ token, user, cropCatalog, onAddCrop, onEditCrop }) {
   const [users, setUsers] = useState([]);
   const [showForm, setShowForm] = useState(false);
+  const [showCropForm, setShowCropForm] = useState(false);
+  const [editingCrop, setEditingCrop] = useState(null);
   const [form, setForm] = useState({ name: "", email: "", role: "field_officer", password: "" });
   const [error, setError] = useState("");
   const isAdmin = user?.role === "admin";
@@ -365,6 +489,12 @@ function SettingsPage({ token, user }) {
     } catch (reason) { setError(reason.message); }
   }
   return <div className="page-content"><div className="page-heading"><div><p className="eyebrow">WORKSPACE PREFERENCES</p><h1>Settings</h1><p className="muted">Configure your account, alerts, and municipal assumptions.</p></div></div><div className="settings-grid"><article className="panel setting-card"><span className="report-icon"><Users size={19} /></span><h2>Organization</h2><p>Municipal Agriculture Office of Boac</p><div className="setting-line"><span>Province</span><strong>Marinduque</strong></div><div className="setting-line"><span>Barangays</span><strong>61</strong></div></article><article className="panel setting-card"><span className="report-icon"><Bell size={19} /></span><h2>Harvest alerts</h2><p>Notify officers ahead of each expected harvest.</p><div className="setting-line"><span>Advance notice</span><strong>14–21 days</strong></div><div className="setting-line"><span>Recipients</span><strong>Municipal + Provincial</strong></div></article><article className="panel setting-card"><span className="report-icon"><Activity size={19} /></span><h2>Forecast assumptions</h2><p>Yield and consumption values are configurable by administrators.</p><div className="setting-line"><span>Demand baseline</span><strong>Population × per-capita ÷ 52</strong></div><div className="setting-line"><span>Yield profile</span><strong>Crop-type default</strong></div></article></div>
+    <article className="panel full-panel user-panel">
+      <div className="panel-heading"><div><h2>Crop catalog</h2><p className="muted">Add crop types shared by field reports, forecasts, and allocation.</p></div><button className="button button-primary" onClick={() => setShowCropForm((value) => !value)}><Plus size={15} /> Add crop</button></div>
+      {showCropForm && <CropCreateForm onSubmit={onAddCrop} onCancel={() => setShowCropForm(false)} onCreated={() => setShowCropForm(false)} />}
+      {editingCrop && <CropCreateForm key={editingCrop.id} crop={editingCrop} onSubmit={(input) => onEditCrop(editingCrop.id, input)} onCancel={() => setEditingCrop(null)} onCreated={() => setEditingCrop(null)} />}
+      <div className="table-scroll"><table><thead><tr><th>CROP</th><th>AVERAGE YIELD</th><th>MATURITY</th><th>CONSUMPTION</th><th>ACTION</th></tr></thead><tbody>{cropCatalog.map((crop) => <tr key={crop.id}><td><strong>{crop.name}</strong></td><td>{formatNumber(crop.yield)} kg/ha</td><td>{crop.maturity} days</td><td>{formatNumber(crop.demandPerPerson || 0)} kg/person/year</td><td><button className="button button-small" type="button" onClick={() => { setShowCropForm(false); setEditingCrop(crop); }}>Edit</button></td></tr>)}</tbody></table></div>
+    </article>
     {isAdmin && <article className="panel full-panel user-panel"><div className="panel-heading"><div><h2>User management</h2><p className="muted">Manage administrator, municipal, provincial, and field accounts.</p></div><button className="button button-primary" onClick={() => setShowForm((value) => !value)}><Plus size={15} /> Add user</button></div>
       {error && <div className="error-box">{error}</div>}
       {showForm && <form className="user-create-form" onSubmit={createUser}><input required placeholder="Full name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /><input type="email" required placeholder="Email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /><select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}><option value="admin">Admin</option><option value="municipal_officer">Municipal Officer</option><option value="provincial_officer">Provincial Officer</option><option value="field_officer">Field Officer</option></select><input type="password" minLength="12" required placeholder="Temporary password (12+ chars)" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /><button className="button button-primary">Create account</button></form>}
@@ -373,9 +503,10 @@ function SettingsPage({ token, user }) {
   </div>;
 }
 
-function ReportModal({ onClose, onSave, crops: cropCatalog }) {
+function ReportModal({ onClose, onSave, crops: cropCatalog, onAddCrop }) {
   const [form, setForm] = useState({ farmer: "", barangay: "Agumaymayan", crop: "Rice", area: "", planted: new Date().toISOString().slice(0, 10), method: "Transplanting" });
   const [position, setPosition] = useState(null);
+  const [showCropForm, setShowCropForm] = useState(false);
   const crop = cropCatalog.find((item) => item.name === form.crop);
   const harvestDate = new Date(`${form.planted}T00:00:00`);
   harvestDate.setDate(harvestDate.getDate() + (crop?.maturity || 0));
@@ -387,10 +518,10 @@ function ReportModal({ onClose, onSave, crops: cropCatalog }) {
   }
   return <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}><form className="report-modal" onSubmit={(e) => { e.preventDefault(); onSave({ ...form, ...position, volume, harvest: harvestDate.toISOString().slice(0, 10) }); }}>
     <div className="modal-header"><div><p className="eyebrow">FIELD DATA COLLECTION</p><h2>New field report</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={18} /></button></div>
-    <div className="form-grid"><label className="wide-field">Farmer name<input required value={form.farmer} onChange={(e) => update("farmer", e.target.value)} placeholder="Enter farmer's full name" /></label><label>Barangay<select value={form.barangay} onChange={(e) => update("barangay", e.target.value)}>{barangays.map((name) => <option key={name}>{name}</option>)}</select></label><label>Crop type<select value={form.crop} onChange={(e) => update("crop", e.target.value)}>{cropCatalog.map((item) => <option key={item.id}>{item.name}</option>)}</select></label><label>Planted area (hectares)<input type="number" min="0.01" step="0.01" required value={form.area} onChange={(e) => update("area", e.target.value)} placeholder="e.g. 1.5" /></label><label>Planting date<input type="date" required value={form.planted} onChange={(e) => update("planted", e.target.value)} /></label><label>Planting method<select value={form.method} onChange={(e) => update("method", e.target.value)}><option>Direct Seeding</option><option>Transplanting</option></select></label><div className="location-field"><div><strong>Farm GPS location</strong><small>{position ? `${position.latitude.toFixed(5)}, ${position.longitude.toFixed(5)}` : "Capture coordinates at the farm visit"}</small></div><button type="button" className="button button-light" onClick={locate}><LocateFixed size={15} /> {position ? "Captured" : "Capture GPS"}</button></div></div>
+    <div className="form-grid"><label className="wide-field">Farmer name<input required value={form.farmer} onChange={(e) => update("farmer", e.target.value)} placeholder="Enter farmer's full name" /></label><label>Barangay<select value={form.barangay} onChange={(e) => update("barangay", e.target.value)}>{barangays.map((name) => <option key={name}>{name}</option>)}</select></label><div className="crop-select-field"><label>Crop type<select value={form.crop} onChange={(e) => update("crop", e.target.value)}>{cropCatalog.map((item) => <option key={item.id}>{item.name}</option>)}</select></label><button type="button" className="text-button" onClick={() => setShowCropForm(true)}>+ Add crop type</button></div><label>Planted area (hectares)<input type="number" min="0.01" step="0.01" required value={form.area} onChange={(e) => update("area", e.target.value)} placeholder="e.g. 1.5" /></label><label>Planting date<input type="date" required value={form.planted} onChange={(e) => update("planted", e.target.value)} /></label><label>Planting method<select value={form.method} onChange={(e) => update("method", e.target.value)}><option>Direct Seeding</option><option>Transplanting</option></select></label><div className="location-field"><div><strong>Farm GPS location</strong><small>{position ? `${position.latitude.toFixed(5)}, ${position.longitude.toFixed(5)}` : "Capture coordinates at the farm visit"}</small></div><button type="button" className="button button-light" onClick={locate}><LocateFixed size={15} /> {position ? "Captured" : "Capture GPS"}</button></div></div>
     <div className="calculation-box"><div><span>Expected harvest</span><strong>{formatNumber(volume)} kg</strong><small>{form.area || "0"} ha × {formatNumber(crop?.yield)} kg/ha</small></div><div><span>Estimated harvest date</span><strong>{harvestDate.toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" })}</strong><small>{crop?.maturity} days after planting</small></div></div>
     <div className="modal-footer"><button type="button" className="button button-light" onClick={() => onSave({ ...form, ...position, volume, harvest: harvestDate.toISOString().slice(0, 10), status: "draft" })}>Save draft</button><button className="button button-primary"><Check size={15} /> Submit report</button></div>
-  </form></div>;
+  </form>{showCropForm && <div className="crop-dialog-backdrop"><CropCreateForm onSubmit={onAddCrop} onCancel={() => setShowCropForm(false)} onCreated={(added) => { update("crop", added.name); setShowCropForm(false); }} /></div>}</div>;
 }
 
 function App() {
@@ -442,18 +573,13 @@ function App() {
       ]);
       if (!active) return;
       setBarangayLocations(barangayData);
-      const updatedCrops = cropData.map((item) => ({
-        id: item.id,
-        name: item.name,
-        yield: Number(item.average_yield_kg_ha),
-        maturity: Number(item.maturity_days),
-        color: crops.find((crop) => crop.name === item.name)?.color || "#39834c",
-      }));
+      const updatedCrops = cropData.map(mapCrop);
       setCropCatalog(updatedCrops);
       setReports(reportData.map((item) => ({
         id: item.id, displayId: item.id.slice(0, 8).toUpperCase(), farmer: item.farmer_name, barangay: item.barangay_name, crop: item.crop_name,
         area: Number(item.area_ha), planted: item.planting_date?.slice(0, 10),
-        harvest: item.planting_date ? formatDate(new Date(new Date(item.planting_date).getTime() + (updatedCrops.find((crop) => crop.name === item.crop_name)?.maturity || 0) * 86400000).toISOString().slice(0, 10)) : "—",
+        harvestDate: item.planting_date ? new Date(new Date(`${item.planting_date.slice(0, 10)}T00:00:00`).getTime() + (updatedCrops.find((crop) => crop.name === item.crop_name)?.maturity || 0) * 86400000).toISOString().slice(0, 10) : null,
+        harvest: item.planting_date ? formatDate(new Date(new Date(`${item.planting_date.slice(0, 10)}T00:00:00`).getTime() + (updatedCrops.find((crop) => crop.name === item.crop_name)?.maturity || 0) * 86400000).toISOString().slice(0, 10)) : "—",
         volume: Number(item.area_ha) * (updatedCrops.find((crop) => crop.name === item.crop_name)?.yield || 0), status: item.status, method: item.planting_method,
       })));
       setForecasts(forecastData);
@@ -549,6 +675,46 @@ function App() {
     }
     setReports((items) => items.map((item) => item.id === report.id ? { ...item, status } : item));
   }
+
+  async function addCrop(cropInput) {
+    const item = await api("/crops", {
+      token,
+      method: "POST",
+      body: JSON.stringify(cropInput),
+    });
+    const created = mapCrop(item);
+    setCropCatalog((current) => [...current.filter((crop) => crop.id !== created.id), created]
+      .sort((left, right) => left.name.localeCompare(right.name)));
+    return created;
+  }
+  async function editCrop(cropId, cropInput) {
+    const updated = mapCrop(await api(`/crops/${cropId}`, {
+      token,
+      method: "PUT",
+      body: JSON.stringify(cropInput),
+    }));
+    const previous = cropCatalog.find((crop) => crop.id === cropId);
+    setCropCatalog((current) => current.map((crop) => crop.id === cropId ? updated : crop)
+      .sort((left, right) => left.name.localeCompare(right.name)));
+    if (previous) {
+      setReports((current) => current.map((report) => {
+        if (report.crop !== previous.name) return report;
+        const harvestDate = report.planted
+          ? new Date(`${report.planted}T00:00:00`)
+          : null;
+        if (harvestDate) harvestDate.setDate(harvestDate.getDate() + updated.maturity);
+        const harvestDateValue = harvestDate?.toISOString().slice(0, 10) || null;
+        return {
+          ...report,
+          crop: updated.name,
+          volume: Number(report.area) * updated.yield,
+          harvestDate: harvestDateValue,
+          harvest: harvestDateValue ? formatDate(harvestDateValue) : report.harvest,
+        };
+      }));
+    }
+    return updated;
+  }
   async function saveReport(form) {
     let persisted;
     if (token) {
@@ -564,6 +730,7 @@ function App() {
       id: persisted?.id || `BO-${new Date().getFullYear()}-${String(Date.now()).slice(-3)}`,
       displayId: persisted?.id?.slice(0, 8).toUpperCase(),
       ...form,
+      harvestDate: form.harvestDate || form.harvest,
       status: form.status || "submitted",
     };
     setReports((items) => [newReport, ...items]); setModal(false);
@@ -626,10 +793,10 @@ function App() {
       {page === "Supply allocation" && <AllocationPage token={token} />}
       {page === "Notifications" && <NotificationsPage token={token} />}
       {page === "Reports" && <ReportsExportPage reports={reports} onExport={exportData} />}
-      {page === "Settings" && <SettingsPage token={token} user={user} />}
+      {page === "Settings" && <SettingsPage token={token} user={user} cropCatalog={cropCatalog} onAddCrop={addCrop} onEditCrop={editCrop} />}
       <footer className="app-footer"><span>AgriCast <span>·</span> Municipal Agriculture Office of Boac</span><span>Data for planning purposes <span>·</span> v1.0.0</span></footer>
     </main>
-    {modal && <ReportModal crops={cropCatalog} onClose={() => setModal(false)} onSave={saveReport} />}
+    {modal && <ReportModal crops={cropCatalog} onClose={() => setModal(false)} onSave={saveReport} onAddCrop={addCrop} />}
   </div>;
 }
 

@@ -24,13 +24,13 @@ Requirements: Node.js 20+, npm, MySQL 8+ (or Docker Desktop), MySQL Workbench, a
 3. Create or update `.env` using `.env.example` as a reference. Set `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DATABASE` to match that MySQL user (remove the old `DATABASE_URL` setting), and change `JWT_SECRET` before using non-demo data. The included defaults match the local Docker setup.
 4. Alternatively, start a local MySQL server with Docker: `docker compose up -d db`. Connect to `localhost:3306` in Workbench using user `cropapp` and password `cropapp`.
 5. Start the API: `cd backend; npm install; npm run dev`
-6. Start the web app in another terminal: `cd frontend; npm install; npm run dev`
-7. Open the Vite URL shown in the terminal. The seeded web demo account is `admin@boac.gov.ph` / `BoacDemo123!`.
-8. To run the Flutter app in Chrome: `cd mobile; flutter pub get; flutter run -d chrome --web-port 5174`. The web build connects to the API on `localhost:4000`; Android emulators use `10.0.2.2:4000`.
+6. Start the web dashboard: `cd frontend; npm install; npm run dev`
+7. Start the field app in Chrome: `cd mobile; flutter pub get; flutter run -d chrome --web-port 5174`.
+8. Open `http://localhost:5173` for the dashboard and `http://localhost:5174` for the field app. Both use the API at `http://localhost:4000/api`. The seeded web demo account is `admin@boac.gov.ph` / `BoacDemo123!`.
 
-For a physical Android device, use the computer's current LAN IP and run `flutter run -d <device> --dart-define=API_BASE_URL=http://<computer-LAN-IP>:4000/api` while both devices are on the same network. If the React dashboard is opened from another device, set `WEB_ORIGIN` in `.env` to include that dashboard origin (for example `http://<computer-LAN-IP>:5173`) and allow inbound TCP port 4000 through Windows Firewall on a trusted private network. Do not expose MySQL port 3306 to the device or the public network.
+In VS Code, run the `Start AgriCast Services` task to start the API and both browser apps together. For access from another device on the same Wi-Fi, open both browser apps using the computer's LAN IP (currently `10.0.10.85`) and allow inbound TCP ports 4000, 5173, and 5174 through Windows Firewall on a trusted private network. The API CORS allowlist in `.env` must include the exact browser origin; restart the API after changing `.env`. Do not expose MySQL port 3306 to the device or the public network.
 
-The API initializes the schema, audit triggers, and sample data on startup. It listens on port 4000 by default. In Workbench, refresh the `crop_supply` schema after the API starts to see its tables and data. The dashboard uses the API when available and includes a small local demo dataset so the UI can be explored before MySQL is configured.
+The API initializes the schema, audit triggers, and sample data on startup. It listens on port 4000 by default. In Workbench, refresh the `crop_supply` schema after the API starts to see its tables and data.
 
 The MySQL database is a new database; existing PostgreSQL data is not copied automatically. Back up and migrate any existing records separately before switching production systems.
 

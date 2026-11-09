@@ -22,6 +22,7 @@ function report(id, farmer, barangay, crop, area, status, method, daysUntilHarve
   return {
     id, farmer, barangay, crop, area,
     planted: plantingDate.toISOString().slice(0, 10),
+    harvestDate: harvestDate.toISOString().slice(0, 10),
     harvest: harvestDate.toLocaleDateString("en-PH", { month: "short", day: "numeric" }),
     volume: area * crops.find((item) => item.name === crop).yield,
     status, method,

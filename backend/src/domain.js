@@ -26,6 +26,20 @@ export function weeklyDemand(population, perCapitaKgPerYear) {
   return people * consumption / 52;
 }
 
+export function validateCropInput(input) {
+  const name = typeof input?.name === "string" ? input.name.trim() : "";
+  const averageYieldKgHa = Number(input?.averageYieldKgHa);
+  const perCapitaKgYear = Number(input?.perCapitaKgYear ?? 0);
+  const maturityDays = Number(input?.maturityDays);
+  if (!name || name.length > 100 ||
+      !Number.isFinite(averageYieldKgHa) || averageYieldKgHa <= 0 || averageYieldKgHa >= 1e10 ||
+      !Number.isFinite(perCapitaKgYear) || perCapitaKgYear < 0 || perCapitaKgYear >= 1e8 ||
+      !Number.isInteger(maturityDays) || maturityDays <= 0 || maturityDays > 3650) {
+    throw new RangeError("Enter a crop name, positive yield, non-negative consumption, and maturity from 1 to 3650 days");
+  }
+  return { name, averageYieldKgHa, perCapitaKgYear, maturityDays };
+}
+
 export function supplyStatus(harvestKg, demandKg) {
   const supply = Number(harvestKg);
   const demand = Number(demandKg);
@@ -35,6 +49,20 @@ export function supplyStatus(harvestKg, demandKg) {
   if (supply > demand) return "oversupply";
   if (supply < demand) return "shortage";
   return "balanced";
+}
+
+export function riskStatus(harvestKg, demandKg) {
+  const supply = Number(harvestKg);
+  const demand = Number(demandKg);
+  if (!Number.isFinite(supply) || supply < 0 || !Number.isFinite(demand) || demand < 0) {
+    throw new RangeError("Supply and demand must be non-negative finite numbers");
+  }
+  if (demand === 0) return supply === 0 ? "green" : "red";
+  if (supply === 0) return "red";
+  const relativeDifference = Math.abs(supply - demand) / demand;
+  if (relativeDifference <= 0.25) return "green";
+  if (relativeDifference <= 1) return "yellow";
+  return "red";
 }
 
 export function allocationPlan(surplusKg, destinations) {

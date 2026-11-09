@@ -7,7 +7,9 @@
             "command": "npm.cmd",
             "args": [
                 "run",
-                "dev"
+                "dev",
+                "--",
+                "--open"
             ],
             "options": {
                 "cwd": "${workspaceFolder}\\backend"
@@ -50,12 +52,51 @@
             }
         },
         {
+            "label": "Start AgriCast Field App in Chrome",
+            "type": "shell",
+            "command": "flutter",
+            "args": [
+                "run",
+                "-d",
+                "chrome",
+                "--web-port",
+                "5174"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}\\mobile"
+            },
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "custom",
+                "pattern": {
+                    "regexp": "^$"
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^Launching lib\\\\main.dart on Chrome in debug mode",
+                    "endsPattern": "^Flutter run key commands\\.$"
+                }
+            }
+        },
+        {
             "label": "Start AgriCast Services",
+            "dependsOn": [
+                "Start AgriCast API",
+                "Start AgriCast Web",
+                "Start AgriCast Field App in Chrome"
+            ],
+            "dependsOrder": "parallel"
+        },
+        {
+            "label": "Start AgriCast Dashboard on Folder Open",
             "dependsOn": [
                 "Start AgriCast API",
                 "Start AgriCast Web"
             ],
-            "dependsOrder": "parallel"
+            "dependsOrder": "sequence",
+            "runOptions": {
+                "runOn": "folderOpen"
+            }
         }
     ]
 }

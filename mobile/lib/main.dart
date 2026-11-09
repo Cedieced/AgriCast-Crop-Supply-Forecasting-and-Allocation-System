@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:geolocator/geolocator.dart';
@@ -14,10 +14,16 @@ import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
 import 'package:uuid/uuid.dart';
 
 const configuredApiBaseUrl = String.fromEnvironment('API_BASE_URL');
+const localDevelopmentApiBaseUrl = String.fromEnvironment(
+  'LOCAL_API_BASE_URL',
+  defaultValue: 'http://10.0.10.85:4000/api',
+);
+
 String resolveApiBaseUrl({
   required bool isWeb,
   required Uri currentUri,
   String override = '',
+  bool debugBuild = kDebugMode,
 }) {
   if (override.isNotEmpty) return override;
   if (isWeb) {
@@ -29,7 +35,7 @@ String resolveApiBaseUrl({
             path: '/api')
         .toString();
   }
-  return 'http://10.0.2.2:4000/api';
+  return debugBuild ? localDevelopmentApiBaseUrl : '';
 }
 
 String get apiBaseUrl => resolveApiBaseUrl(
@@ -37,13 +43,23 @@ String get apiBaseUrl => resolveApiBaseUrl(
       currentUri: Uri.base,
       override: configuredApiBaseUrl,
     );
+
 const green = Color(0xFF34764A);
 const crops = <String, Map<String, num>>{
-  'Rice': {'maturity': 120, 'yield': 4500},
-  'Corn': {'maturity': 110, 'yield': 4200},
-  'Mongo': {'maturity': 90, 'yield': 950},
-  'Tomato': {'maturity': 75, 'yield': 18000},
+  'Rice': {'maturity': 120, 'yield': 4500, 'perCapita': 115},
+  'Corn': {'maturity': 110, 'yield': 4200, 'perCapita': 18},
+  'Mongo': {'maturity': 90, 'yield': 950, 'perCapita': 1.2},
+  'Tomato': {'maturity': 75, 'yield': 18000, 'perCapita': 9},
 };
+
+List<Map<String, Object?>> defaultCropCatalog() => crops.entries
+    .map((entry) => <String, Object?>{
+          'name': entry.key,
+          'average_yield_kg_ha': entry.value['yield'],
+          'maturity_days': entry.value['maturity'],
+          'per_capita_kg_year': entry.value['perCapita'],
+        })
+    .toList();
 const barangays = [
   'Agot',
   'Agumaymayan',
@@ -108,6 +124,21 @@ const barangays = [
   'Tumapon',
 ];
 
+Future<void> createLocalCropCatalog(DatabaseExecutor db) async {
+  await db.execute('''
+    CREATE TABLE crop_catalog (
+      name TEXT PRIMARY KEY,
+      average_yield_kg_ha REAL NOT NULL,
+      maturity_days INTEGER NOT NULL,
+      per_capita_kg_year REAL NOT NULL DEFAULT 0
+    )
+  ''');
+  for (final crop in defaultCropCatalog()) {
+    await db.insert('crop_catalog', crop,
+        conflictAlgorithm: ConflictAlgorithm.ignore);
+  }
+}
+
 Future<Database> openLocalDatabase() async {
   final String path;
   if (kIsWeb) {
@@ -116,22 +147,70 @@ Future<Database> openLocalDatabase() async {
   } else {
     path = p.join(await getDatabasesPath(), 'agriflow.db');
   }
-  return openDatabase(path, version: 1, onCreate: (db, _) async {
+  return openDatabase(path, version: 3, onCreate: (db, _) async {
     await db.execute('''
       CREATE TABLE reports (
         id TEXT PRIMARY KEY, farmer_name TEXT NOT NULL, barangay_name TEXT NOT NULL,
         crop_name TEXT NOT NULL, area_ha REAL NOT NULL, planting_date TEXT NOT NULL,
-        planting_method TEXT NOT NULL, latitude REAL, longitude REAL, status TEXT NOT NULL,
+        planting_method TEXT NOT NULL, latitude REAL, longitude REAL, maturity_days INTEGER,
+        status TEXT NOT NULL,
         sync_state TEXT NOT NULL DEFAULT 'queued', created_at TEXT NOT NULL
       )
     ''');
+    await createLocalCropCatalog(db);
+  }, onUpgrade: (db, oldVersion, _) async {
+    if (oldVersion < 2) {
+      await createLocalCropCatalog(db);
+    }
+    if (oldVersion < 3) {
+      await db.execute('ALTER TABLE reports ADD COLUMN maturity_days INTEGER');
+    }
   });
 }
 
 class FieldApi {
   final http.Client client;
   final FlutterSecureStorage storage;
-  FieldApi(this.client, this.storage);
+  final String baseUrl;
+
+  FieldApi(this.client, this.storage, {String? baseUrl})
+      : baseUrl = baseUrl ?? apiBaseUrl;
+
+  Future<void> checkHealth() async {
+    if (baseUrl.isEmpty) {
+      throw Exception(
+          'The API server is not configured for this build. Please contact your administrator.');
+    }
+    final response = await _send(
+      client.get(Uri.parse('$baseUrl/health')),
+      'API connection check',
+    );
+    if (response.statusCode != 200) {
+      throw Exception(
+          'The API server is unavailable. Please check your connection and try again.');
+    }
+  }
+
+  Future<bool> validateSession(String token) async {
+    final response = await _send(
+      client.get(
+        Uri.parse('$baseUrl/auth/me'),
+        headers: {'Authorization': 'Bearer $token'},
+      ),
+      'Session check',
+    );
+    if (response.statusCode == 401) return false;
+    if (response.statusCode != 200) {
+      throw Exception(_responseError(response, 'Session check failed'));
+    }
+    return true;
+  }
+
+  void _throwIfSessionExpired(http.Response response) {
+    if (response.statusCode == 401) {
+      throw const SessionExpiredException();
+    }
+  }
 
   Future<http.Response> _send(
       Future<http.Response> request, String operation) async {
@@ -139,10 +218,10 @@ class FieldApi {
       return await request.timeout(const Duration(seconds: 15));
     } on TimeoutException {
       throw Exception(
-          '$operation timed out. Check that the API is reachable at $apiBaseUrl.');
+          '$operation timed out. Check your connection and try again.');
     } on http.ClientException {
       throw Exception(
-          'Cannot reach the API at $apiBaseUrl. Check the API server, network, and device URL.');
+          'Cannot reach the API server. Check your connection and try again.');
     }
   }
 
@@ -171,7 +250,7 @@ class FieldApi {
   Future<String> login(String email, String password) async {
     final response = await _send(
       client.post(
-        Uri.parse('$apiBaseUrl/auth/login'),
+        Uri.parse('$baseUrl/auth/login'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'email': email, 'password': password}),
       ),
@@ -206,7 +285,7 @@ class FieldApi {
     if (token == null) throw Exception('Please sign in again before syncing.');
     final response = await _send(
       client.post(
-        Uri.parse('$apiBaseUrl/reports'),
+        Uri.parse('$baseUrl/reports'),
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer $token'
@@ -216,9 +295,100 @@ class FieldApi {
       ),
       'Report sync',
     );
+    _throwIfSessionExpired(response);
     if (response.statusCode != 200 && response.statusCode != 201) {
       throw Exception(_responseError(response, 'Report sync failed'));
     }
+  }
+
+  Future<List<Map<String, Object?>>> fetchCrops() async {
+    final token = await storage.read(key: 'jwt');
+    if (token == null) {
+      throw Exception('Please sign in again before loading crops.');
+    }
+    final response = await _send(
+      client.get(
+        Uri.parse('$baseUrl/crops'),
+        headers: {'Authorization': 'Bearer $token'},
+      ),
+      'Crop catalog download',
+    );
+    _throwIfSessionExpired(response);
+    if (response.statusCode != 200) {
+      throw Exception(_responseError(response, 'Crop catalog download failed'));
+    }
+
+    late final Object? decoded;
+    try {
+      decoded = jsonDecode(response.body);
+    } on FormatException {
+      throw Exception('The crop catalog API returned invalid JSON.');
+    }
+    if (decoded is! List) {
+      throw Exception('The crop catalog API returned an invalid response.');
+    }
+    return decoded.map((item) {
+      if (item is! Map<String, dynamic>) {
+        throw Exception('The crop catalog contains an invalid crop.');
+      }
+      final yield = num.tryParse(item['average_yield_kg_ha']?.toString() ?? '');
+      final maturity = int.tryParse(item['maturity_days']?.toString() ?? '');
+      final perCapita =
+          num.tryParse(item['per_capita_kg_year']?.toString() ?? '');
+      if (item['name'] is! String || yield == null || maturity == null) {
+        throw Exception('The crop catalog contains an incomplete crop.');
+      }
+      return <String, Object?>{
+        'name': item['name'],
+        'average_yield_kg_ha': yield,
+        'maturity_days': maturity,
+        'per_capita_kg_year': perCapita ?? 0,
+      };
+    }).toList();
+  }
+
+  Future<Map<String, Object?>> createCrop({
+    required String name,
+    required double averageYieldKgHa,
+    required int maturityDays,
+    required double perCapitaKgYear,
+  }) async {
+    final token = await storage.read(key: 'jwt');
+    if (token == null) {
+      throw Exception('Please sign in again before adding crops.');
+    }
+    final response = await _send(
+      client.post(
+        Uri.parse('$baseUrl/crops'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: jsonEncode({
+          'name': name.trim(),
+          'averageYieldKgHa': averageYieldKgHa,
+          'maturityDays': maturityDays,
+          'perCapitaKgYear': perCapitaKgYear,
+        }),
+      ),
+      'Crop creation',
+    );
+    _throwIfSessionExpired(response);
+    if (response.statusCode != 201) {
+      throw Exception(_responseError(response, 'Could not add crop type'));
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! Map<String, dynamic>) {
+      throw Exception('The crop API returned an invalid response.');
+    }
+    return <String, Object?>{
+      'name': decoded['name'],
+      'average_yield_kg_ha':
+          num.tryParse(decoded['average_yield_kg_ha']?.toString() ?? ''),
+      'maturity_days': int.tryParse(decoded['maturity_days']?.toString() ?? ''),
+      'per_capita_kg_year':
+          num.tryParse(decoded['per_capita_kg_year']?.toString() ?? '') ?? 0,
+    };
   }
 
   Future<List<Map<String, Object?>>> fetchReports() async {
@@ -226,11 +396,12 @@ class FieldApi {
     if (token == null) throw Exception('Please sign in again before syncing.');
     final response = await _send(
       client.get(
-        Uri.parse('$apiBaseUrl/reports'),
+        Uri.parse('$baseUrl/reports'),
         headers: {'Authorization': 'Bearer $token'},
       ),
       'Report download',
     );
+    _throwIfSessionExpired(response);
     if (response.statusCode != 200) {
       throw Exception(_responseError(response, 'Report download failed'));
     }
@@ -256,6 +427,7 @@ class FieldApi {
         'area_ha': num.tryParse(item['area_ha']?.toString() ?? ''),
         'planting_date': item['planting_date']?.toString(),
         'planting_method': item['planting_method'],
+        'maturity_days': int.tryParse(item['maturity_days']?.toString() ?? ''),
         'latitude': num.tryParse(item['latitude']?.toString() ?? ''),
         'longitude': num.tryParse(item['longitude']?.toString() ?? ''),
         'status': item['status'],
@@ -271,7 +443,7 @@ class FieldApi {
     if (token == null) throw Exception('Please sign in again before syncing.');
     final response = await _send(
       client.put(
-        Uri.parse('$apiBaseUrl/reports/${report['id']}'),
+        Uri.parse('$baseUrl/reports/${report['id']}'),
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer $token',
@@ -280,6 +452,7 @@ class FieldApi {
       ),
       'Report update',
     );
+    _throwIfSessionExpired(response);
     if (response.statusCode != 200) {
       throw Exception(_responseError(response, 'Report update failed'));
     }
@@ -290,11 +463,12 @@ class FieldApi {
     if (token == null) throw Exception('Please sign in again before syncing.');
     final response = await _send(
       client.delete(
-        Uri.parse('$apiBaseUrl/reports/$reportId'),
+        Uri.parse('$baseUrl/reports/$reportId'),
         headers: {'Authorization': 'Bearer $token'},
       ),
       'Report deletion',
     );
+    _throwIfSessionExpired(response);
     if (response.statusCode != 200) {
       throw Exception(_responseError(response, 'Report deletion failed'));
     }
@@ -311,6 +485,14 @@ class FieldApi {
         'longitude': report['longitude'],
         'status': report['status'],
       };
+}
+
+class SessionExpiredException implements Exception {
+  const SessionExpiredException();
+
+  @override
+  String toString() =>
+      'Your session expired. Sign in again to sync pending reports.';
 }
 
 void main() {
@@ -330,27 +512,71 @@ class _AgriFlowAppState extends State<AgriFlowApp> {
   late final Future<Database> database = openLocalDatabase();
   late final FieldApi api = FieldApi(client, storage);
   String? token;
+  String? startupError;
+  String? loginMessage;
   bool checkingSession = true;
 
   @override
   void initState() {
     super.initState();
-    storage.read(key: 'jwt').then((value) {
+    initialize();
+  }
+
+  Future<void> initialize() async {
+    await storage.delete(key: 'api_base_url');
+    var storedToken = await storage.read(key: 'jwt');
+    try {
+      await api.checkHealth();
+      if (storedToken != null && !await api.validateSession(storedToken)) {
+        await storage.delete(key: 'jwt');
+        storedToken = null;
+        loginMessage =
+            'Your session expired. Sign in again to sync pending reports.';
+      }
       if (mounted) {
         setState(() {
-          token = value;
+          token = storedToken;
+          startupError = null;
           checkingSession = false;
         });
       }
-    });
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          token = storedToken;
+          startupError = storedToken == null
+              ? error.toString().replaceFirst('Exception: ', '')
+              : null;
+          checkingSession = false;
+        });
+      }
+    }
   }
 
   void signedIn(String value) => setState(() {
         token = value;
+        loginMessage = null;
       });
+
   Future<void> signOut() async {
     await storage.delete(key: 'jwt');
-    if (mounted) setState(() => token = null);
+    if (mounted) {
+      setState(() {
+        token = null;
+        loginMessage = null;
+      });
+    }
+  }
+
+  Future<void> sessionExpired() async {
+    await storage.delete(key: 'jwt');
+    if (mounted) {
+      setState(() {
+        token = null;
+        loginMessage =
+            'Your session expired. Sign in again to sync pending reports.';
+      });
+    }
   }
 
   @override
@@ -375,25 +601,84 @@ class _AgriFlowAppState extends State<AgriFlowApp> {
         ),
         home: checkingSession
             ? const Scaffold(body: Center(child: CircularProgressIndicator()))
-            : token == null
-                ? LoginPage(api: api, onSignedIn: signedIn)
-                : FieldHome(database: database, api: api, onSignOut: signOut),
+            : startupError != null
+                ? ApiUnavailablePage(
+                    message: startupError!, onRetry: initialize)
+                : token == null
+                    ? LoginPage(
+                        api: api,
+                        onSignedIn: signedIn,
+                        initialMessage: loginMessage,
+                      )
+                    : FieldHome(
+                        database: database,
+                        api: api,
+                        onSignOut: signOut,
+                        onSessionExpired: sessionExpired,
+                      ),
+      );
+}
+
+class ApiUnavailablePage extends StatelessWidget {
+  final String message;
+  final VoidCallback onRetry;
+
+  const ApiUnavailablePage(
+      {super.key, required this.message, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const _BrandMark(),
+                  const SizedBox(height: 24),
+                  const Text(
+                    'Unable to connect',
+                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(message, textAlign: TextAlign.center),
+                  const SizedBox(height: 20),
+                  FilledButton(onPressed: onRetry, child: const Text('Retry')),
+                ],
+              ),
+            ),
+          ),
+        ),
       );
 }
 
 class LoginPage extends StatefulWidget {
   final FieldApi api;
   final ValueChanged<String> onSignedIn;
-  const LoginPage({super.key, required this.api, required this.onSignedIn});
+  final String? initialMessage;
+
+  const LoginPage({
+    super.key,
+    required this.api,
+    required this.onSignedIn,
+    this.initialMessage,
+  });
   @override
   State<LoginPage> createState() => _LoginPageState();
 }
 
 class _LoginPageState extends State<LoginPage> {
-  final email = TextEditingController(text: 'field_officer@boac.gov.ph');
-  final password = TextEditingController(text: 'BoacDemo123!');
+  final email = TextEditingController();
+  final password = TextEditingController();
   bool busy = false;
   String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    error = widget.initialMessage;
+  }
 
   Future<void> submit() async {
     setState(() {
@@ -433,15 +718,6 @@ class _LoginPageState extends State<LoginPage> {
                   const Text('Field officer sign in',
                       style:
                           TextStyle(fontSize: 26, fontWeight: FontWeight.w800)),
-                  const SizedBox(height: 8),
-                  const Text(
-                      'Sign in while connected. Your active session lets you record farm visits offline.',
-                      style: TextStyle(color: Color(0xFF748177), height: 1.5)),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Demo account: field_officer@boac.gov.ph · BoacDemo123!',
-                    style: TextStyle(fontSize: 11, color: Color(0xFF748177)),
-                  ),
                   const SizedBox(height: 24),
                   TextField(
                       controller: email,
@@ -465,12 +741,6 @@ class _LoginPageState extends State<LoginPage> {
                       child: FilledButton(
                           onPressed: busy ? null : submit,
                           child: Text(busy ? 'Signing in…' : 'Sign in'))),
-                  const SizedBox(height: 18),
-                  const Center(
-                      child: Text(
-                          'Municipal Agriculture Office · Boac, Marinduque',
-                          style: TextStyle(
-                              fontSize: 11, color: Color(0xFF859087)))),
                 ],
               )),
         ))),
@@ -481,11 +751,14 @@ class FieldHome extends StatefulWidget {
   final Future<Database> database;
   final FieldApi api;
   final Future<void> Function() onSignOut;
+  final Future<void> Function() onSessionExpired;
+
   const FieldHome(
       {super.key,
       required this.database,
       required this.api,
-      required this.onSignOut});
+      required this.onSignOut,
+      required this.onSessionExpired});
   @override
   State<FieldHome> createState() => _FieldHomeState();
 }
@@ -549,6 +822,10 @@ class _FieldHomeState extends State<FieldHome> {
             where: 'id = ?', whereArgs: [report['id']]);
         syncError = null;
       } catch (error) {
+        if (error is SessionExpiredException) {
+          await widget.onSessionExpired();
+          return;
+        }
         syncError = error.toString().replaceFirst('Exception: ', '');
         break;
       }
@@ -561,6 +838,10 @@ class _FieldHomeState extends State<FieldHome> {
               conflictAlgorithm: ConflictAlgorithm.replace);
         }
       } catch (error) {
+        if (error is SessionExpiredException) {
+          await widget.onSessionExpired();
+          return;
+        }
         syncError = error.toString().replaceFirst('Exception: ', '');
       }
     }
@@ -672,7 +953,10 @@ class _FieldHomeState extends State<FieldHome> {
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () async {
           final report = await Navigator.of(context).push<Map<String, Object?>>(
-            MaterialPageRoute(builder: (_) => const ReportForm()),
+            MaterialPageRoute(
+              builder: (_) =>
+                  ReportForm(api: widget.api, database: widget.database),
+            ),
           );
           if (report != null) await saveReport(report);
         },
@@ -683,8 +967,115 @@ class _FieldHomeState extends State<FieldHome> {
   }
 }
 
+class CropTypeDialog extends StatefulWidget {
+  const CropTypeDialog({super.key});
+
+  @override
+  State<CropTypeDialog> createState() => _CropTypeDialogState();
+}
+
+class _CropTypeDialogState extends State<CropTypeDialog> {
+  final formKey = GlobalKey<FormState>();
+  final name = TextEditingController();
+  final averageYield = TextEditingController();
+  final maturityDays = TextEditingController();
+  final perCapitaKgYear = TextEditingController(text: '0');
+
+  @override
+  void dispose() {
+    name.dispose();
+    averageYield.dispose();
+    maturityDays.dispose();
+    perCapitaKgYear.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: const Text('Add crop type'),
+        content: Form(
+          key: formKey,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: name,
+                  maxLength: 100,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: const InputDecoration(labelText: 'Crop name *'),
+                  validator: (value) => value == null || value.trim().isEmpty
+                      ? 'Enter a crop name'
+                      : null,
+                ),
+                TextFormField(
+                  controller: averageYield,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                      labelText: 'Average yield (kg/ha) *'),
+                  validator: (value) {
+                    final parsed = double.tryParse(value ?? '');
+                    return parsed == null || parsed <= 0
+                        ? 'Enter a yield greater than 0'
+                        : null;
+                  },
+                ),
+                TextFormField(
+                  controller: maturityDays,
+                  keyboardType: TextInputType.number,
+                  decoration:
+                      const InputDecoration(labelText: 'Days to maturity *'),
+                  validator: (value) {
+                    final parsed = int.tryParse(value ?? '');
+                    return parsed == null || parsed < 1 || parsed > 3650
+                        ? 'Enter 1 to 3650 days'
+                        : null;
+                  },
+                ),
+                TextFormField(
+                  controller: perCapitaKgYear,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                      labelText: 'Consumption (kg/person/year)'),
+                  validator: (value) {
+                    final parsed = double.tryParse(value ?? '');
+                    return parsed == null || parsed < 0
+                        ? 'Enter 0 or a positive amount'
+                        : null;
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () {
+              if (!formKey.currentState!.validate()) return;
+              Navigator.pop(context, <String, Object?>{
+                'name': name.text.trim(),
+                'average_yield_kg_ha': double.parse(averageYield.text),
+                'maturity_days': int.parse(maturityDays.text),
+                'per_capita_kg_year': double.parse(perCapitaKgYear.text),
+              });
+            },
+            child: const Text('Add crop'),
+          ),
+        ],
+      );
+}
+
 class ReportForm extends StatefulWidget {
-  const ReportForm({super.key});
+  final FieldApi api;
+  final Future<Database> database;
+
+  const ReportForm({super.key, required this.api, required this.database});
+
   @override
   State<ReportForm> createState() => _ReportFormState();
 }
@@ -693,6 +1084,7 @@ class _ReportFormState extends State<ReportForm> {
   final formKey = GlobalKey<FormState>();
   final farmer = TextEditingController();
   final area = TextEditingController();
+  List<Map<String, Object?>> cropCatalog = defaultCropCatalog();
   String barangay = barangays[1];
   String crop = 'Rice';
   String method = 'Transplanting';
@@ -700,12 +1092,109 @@ class _ReportFormState extends State<ReportForm> {
   Position? position;
   bool locating = false;
   bool saving = false;
+  bool loadingCrops = false;
+  bool addingCrop = false;
   String? locationError;
+  String? cropMessage;
 
-  DateTime get harvestDate =>
-      plantingDate.add(Duration(days: crops[crop]!['maturity']!.toInt()));
+  Map<String, Object?> get selectedCrop => cropCatalog.firstWhere(
+        (item) => item['name'] == crop,
+        orElse: () => defaultCropCatalog().firstWhere(
+          (item) => item['name'] == crop,
+        ),
+      );
+
+  int get maturityDays => (selectedCrop['maturity_days'] as num).toInt();
+  num get averageYield => selectedCrop['average_yield_kg_ha'] as num;
+  DateTime get harvestDate => plantingDate.add(Duration(days: maturityDays));
   double get expectedKg =>
-      (double.tryParse(area.text) ?? 0) * crops[crop]!['yield']!.toDouble();
+      (double.tryParse(area.text) ?? 0) * averageYield.toDouble();
+
+  @override
+  void initState() {
+    super.initState();
+    loadCropCatalog();
+  }
+
+  Future<void> loadCropCatalog() async {
+    setState(() => loadingCrops = true);
+    final db = await widget.database;
+    final cached = await db.query('crop_catalog', orderBy: 'name');
+    if (cached.isNotEmpty && mounted) {
+      setState(() {
+        cropCatalog = cached;
+        if (!cropCatalog.any((item) => item['name'] == crop)) {
+          crop = cropCatalog.first['name']! as String;
+        }
+      });
+    }
+    try {
+      final remote = await widget.api.fetchCrops();
+      await db.transaction((transaction) async {
+        for (final item in remote) {
+          await transaction.insert('crop_catalog', item,
+              conflictAlgorithm: ConflictAlgorithm.replace);
+        }
+      });
+      if (mounted) {
+        setState(() {
+          cropCatalog = remote;
+          if (remote.isNotEmpty &&
+              !remote.any((item) => item['name'] == crop)) {
+            crop = remote.first['name']! as String;
+          }
+          cropMessage = null;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          cropMessage = cached.isEmpty
+              ? 'Could not load crop types. Check your connection and retry.'
+              : 'Offline: using saved crop types.';
+        });
+      }
+    } finally {
+      if (mounted) setState(() => loadingCrops = false);
+    }
+  }
+
+  Future<void> addCrop() async {
+    final details = await showDialog<Map<String, Object?>>(
+      context: context,
+      builder: (context) => const CropTypeDialog(),
+    );
+    if (details == null) return;
+    setState(() {
+      addingCrop = true;
+      cropMessage = null;
+    });
+    try {
+      final created = await widget.api.createCrop(
+        name: details['name']! as String,
+        averageYieldKgHa: details['average_yield_kg_ha']! as double,
+        maturityDays: details['maturity_days']! as int,
+        perCapitaKgYear: details['per_capita_kg_year']! as double,
+      );
+      final db = await widget.database;
+      await db.insert('crop_catalog', created,
+          conflictAlgorithm: ConflictAlgorithm.replace);
+      if (mounted) {
+        setState(() {
+          cropCatalog = [...cropCatalog, created]..sort((left, right) =>
+              (left['name']! as String).compareTo(right['name']! as String));
+          crop = created['name']! as String;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() =>
+            cropMessage = error.toString().replaceFirst('Exception: ', ''));
+      }
+    } finally {
+      if (mounted) setState(() => addingCrop = false);
+    }
+  }
 
   Future<void> captureLocation() async {
     setState(() {
@@ -755,6 +1244,7 @@ class _ReportFormState extends State<ReportForm> {
       'barangay_name': barangay,
       'crop_name': crop,
       'area_ha': double.parse(area.text),
+      'maturity_days': maturityDays,
       'planting_date': DateFormat('yyyy-MM-dd').format(plantingDate),
       'planting_method': method,
       'latitude': position?.latitude,
@@ -808,15 +1298,48 @@ class _ReportFormState extends State<ReportForm> {
                         ? 'Enter the farmer name'
                         : null),
                 const SizedBox(height: 13),
-                DropdownButtonFormField<String>(
-                  initialValue: crop,
-                  decoration: const InputDecoration(labelText: 'Crop type *'),
-                  items: crops.keys
-                      .map((name) =>
-                          DropdownMenuItem(value: name, child: Text(name)))
-                      .toList(),
-                  onChanged: (value) => setState(() => crop = value!),
+                Row(
+                  children: [
+                    Expanded(
+                      child: DropdownButtonFormField<String>(
+                        key: ValueKey(crop),
+                        initialValue: crop,
+                        decoration:
+                            const InputDecoration(labelText: 'Crop type *'),
+                        items: cropCatalog
+                            .map((item) => DropdownMenuItem(
+                                  value: item['name']! as String,
+                                  child: Text(item['name']! as String),
+                                ))
+                            .toList(),
+                        onChanged: (value) =>
+                            setState(() => crop = value ?? crop),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      onPressed: addingCrop ? null : addCrop,
+                      tooltip: 'Add crop type',
+                      icon: addingCrop
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.add),
+                    ),
+                  ],
                 ),
+                if (loadingCrops) const LinearProgressIndicator(minHeight: 2),
+                if (cropMessage != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(cropMessage!,
+                        style: TextStyle(
+                            color: cropMessage!.startsWith('Offline:')
+                                ? Colors.orange.shade800
+                                : Colors.red.shade700,
+                            fontSize: 11)),
+                  ),
                 const SizedBox(height: 13),
                 TextFormField(
                   controller: area,
@@ -877,13 +1400,12 @@ class _ReportFormState extends State<ReportForm> {
                         label: 'Expected harvest',
                         value: '${NumberFormat('#,##0').format(expectedKg)} kg',
                         hint:
-                            '${area.text.isEmpty ? '0' : area.text} ha × ${NumberFormat('#,##0').format(crops[crop]!['yield'])} kg/ha'),
+                            '${area.text.isEmpty ? '0' : area.text} ha × ${NumberFormat('#,##0').format(averageYield)} kg/ha'),
                     const Divider(height: 22),
                     _CalculationLine(
                         label: 'Estimated harvest date',
                         value: DateFormat('MMM d, yyyy').format(harvestDate),
-                        hint:
-                            '${crops[crop]!['maturity']} days after planting'),
+                        hint: '$maturityDays days after planting'),
                   ]),
                 ),
                 const SizedBox(height: 20),
@@ -957,8 +1479,12 @@ class _ReportTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final synced = report['sync_state'] == 'synced';
+    final cropName = report['crop_name'] as String;
+    final maturityDays = (report['maturity_days'] as num?)?.toInt() ??
+        crops[cropName]?['maturity']?.toInt() ??
+        0;
     final harvest = DateTime.parse(report['planting_date'] as String)
-        .add(Duration(days: crops[report['crop_name']]!['maturity']!.toInt()));
+        .add(Duration(days: maturityDays));
     return Card(
       color: Colors.white,
       elevation: 0,

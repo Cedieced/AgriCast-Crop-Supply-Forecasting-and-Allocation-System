@@ -203,9 +203,9 @@ flowchart LR
 │ Boac Municipality   ├──────────────────────────────────────────────────────────┤
 │                     │ Good morning, Alex                   [+ New field report]│
 │ OVERVIEW            │                                                          │
-│ ▸ Dashboard         │ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ │
-│   Map view          │ │ Harvest   │ │ Area      │ │ To review │ │ Barangays │ │
-│ OPERATIONS          │ └───────────┘ └───────────┘ └───────────┘ └───────────┘ │
+│ ▸ Dashboard         │ ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐  │
+│   Map view          │ │ Harvest   │ │ Area      │ │ To review │ │ Barangays │  │
+│ OPERATIONS          │ └───────────┘ └───────────┘ └───────────┘ └───────────┘  │
 │   Field reports     │ ┌────────────────────┐ ┌───────────────────────────────┐ │
 │   Forecasting       │ │ Harvest outlook    │ │ Production by barangay (map)  │ │
 │   Supply allocation │ └────────────────────┘ └───────────────────────────────┘ │
@@ -224,17 +224,17 @@ flowchart LR
 │ AgriCast Field app │
 │ You’re online · 1 queued    │
 │                             │
-│ Farm data collection       │
-│ Barangay             [▼]   │
-│ Farmer name          [___] │
-│ Crop type            [▼]   │
-│ Area (hectares)      [___] │
+│ Farm data collection        │ 
+│ Barangay             [▼]    │
+│ Farmer name          [___]  │
+│ Crop type            [▼]    │
+│ Area (hectares)      [___]  │
 │ Planting date        [📅]  │
-│ Planting method      [▼]   │
-│ [Capture farm GPS location]│
+│ Planting method      [▼]    │
+│ [Capture farm GPS location] │
 │                             │
-│ Expected harvest      kg   │
-│ Estimated harvest date     │
+│ Expected harvest      kg    │
+│ Estimated harvest date      │
 │                             │
 │ [Save draft] [Submit report]│
 └─────────────────────────────┘
