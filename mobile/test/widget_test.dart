@@ -37,6 +37,23 @@ void main() {
       ),
       'https://api.example.gov.ph/api',
     );
+    expect(
+      resolveApiBaseUrl(
+        isWeb: false,
+        currentUri: Uri.parse('file:///app'),
+        override: 'http://api.example.gov.ph/api',
+        debugBuild: false,
+      ),
+      isEmpty,
+    );
+    expect(
+      resolveApiBaseUrl(
+        isWeb: true,
+        currentUri: Uri.parse('https://field.example.gov.ph/'),
+        debugBuild: false,
+      ),
+      isEmpty,
+    );
   });
 
   test('API health check uses the centralized configured base URL', () async {

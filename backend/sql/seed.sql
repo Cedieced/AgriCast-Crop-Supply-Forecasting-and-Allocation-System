@@ -1,5 +1,3 @@
-USE crop_supply;
-
 INSERT IGNORE INTO municipalities (name, population) VALUES
   ('Boac', 57915), ('Mogpog', 34871), ('Gasan', 38323), ('Buenavista', 26139),
   ('Torrijos', 30854), ('Santa Cruz', 55493);

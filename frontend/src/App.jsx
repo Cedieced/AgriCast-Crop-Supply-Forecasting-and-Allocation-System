@@ -37,7 +37,7 @@ function StatusBadge({ status }) {
 
 function Login({ onLogin, onPreview }) {
   const [email, setEmail] = useState("admin@boac.gov.ph");
-  const [password, setPassword] = useState("BoacDemo123!");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   async function submit(event) {
@@ -49,12 +49,12 @@ function Login({ onLogin, onPreview }) {
   }
   return <main className="login-shell">
     <div className="login-visual">
-      <div className="visual-brand"><span className="brand-icon"><Sprout size={24} /></span> AgriCast <span className="brand-tag">BOAC</span></div>
+      <div className="visual-brand"><img className="brand-logo" src="/agricast-logo.png" alt="AgriCast" /></div>
       <div className="visual-copy"><p className="eyebrow">MUNICIPAL AGRICULTURE OFFICE · MARINDUQUE</p><h1>Better harvests<br />start with better<br /><em>insights.</em></h1><p>One shared view of the crops, people, and possibilities growing across Boac.</p></div>
       <div className="visual-footer"><span><span className="online-dot" /> Boac, Marinduque</span><span>Crop supply intelligence</span></div>
     </div>
     <div className="login-form-wrap"><form className="login-form" onSubmit={submit}>
-      <div className="login-mobile-brand"><span className="brand-icon"><Sprout size={22} /></span> AgriCast</div>
+      <div className="login-mobile-brand"><img className="brand-logo" src="/agricast-logo.png" alt="AgriCast" /></div>
       <p className="eyebrow">WELCOME BACK</p><h2>Sign in to your workspace</h2><p className="muted">Use your municipal or field officer account.</p>
       {error && <div className="error-box">{error}<br /><button type="button" className="text-button" onClick={onPreview}>Open local demo instead</button></div>}
       <label>Email address<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required /></label>
@@ -538,6 +538,7 @@ function App() {
   const [boundaryStatus, setBoundaryStatus] = useState("not-loaded");
   const [boundaryReload, setBoundaryReload] = useState(0);
   const [apiOnline, setApiOnline] = useState(false);
+  const [apiError, setApiError] = useState("");
   const [modal, setModal] = useState(false);
   const [selectedBarangay, setSelectedBarangay] = useState("Agumaymayan");
   const [mobileNav, setMobileNav] = useState(false);
@@ -584,17 +585,29 @@ function App() {
       })));
       setForecasts(forecastData);
       setApiOnline(true);
+      setApiError("");
     }
-    const initialLoad = () => refresh().catch(() => setApiOnline(false));
+    const initialLoad = () => refresh().catch((error) => {
+      console.error("Could not refresh dashboard data from the API", error);
+      setApiOnline(false);
+      setApiError(error.message);
+    });
     initialLoad();
     const unsubscribe = subscribeToUpdates(token, () => {
       initialLoad();
       window.dispatchEvent(new Event("agricast:data-changed"));
     }, (connected) => {
-      if (active && !connected) setApiOnline(false);
+      if (!active) return;
+      if (connected) {
+        initialLoad();
+      } else {
+        setApiOnline(false);
+      }
     });
+    const refreshTimer = window.setInterval(initialLoad, 60000);
     return () => {
       active = false;
+      window.clearInterval(refreshTimer);
       unsubscribe();
     };
   }, [token]);
@@ -779,13 +792,13 @@ function App() {
   }
   return <div className="app-shell">
     <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
-      <div className="sidebar-brand"><span className="brand-icon"><Sprout size={21} /></span><span>AgriCast<small>BOAC AGRICULTURE</small></span><button className="close-sidebar" onClick={() => setMobileNav(false)}><X size={18} /></button></div>
+      <div className="sidebar-brand"><img className="brand-logo" src="/agricast-logo.png" alt="AgriCast" /><button className="close-sidebar" onClick={() => setMobileNav(false)}><X size={18} /></button></div>
       <div className="workspace-switch"><span className="workspace-seal">B</span><span><strong>Boac Municipality</strong><small>Marinduque Province</small></span><ChevronDown size={14} /></div>
       <nav className="side-nav">{navigation.map((group) => <div key={group.section}><p className="nav-section">{group.section}</p>{group.items.map(([label, Icon]) => <button key={label} className={`nav-item ${page === label ? "nav-active" : ""}`} onClick={() => { setPage(label); setMobileNav(false); }}><Icon size={17} /><span>{label}</span>{label === "Notifications" && <i className="nav-notification" />}</button>)}</div>)}</nav>
       <div className="sidebar-bottom"><div className="sync-status"><span className="sync-icon"><Cloud size={16} /></span><span><strong>{apiOnline ? "Connected to server" : "Demo workspace"}</strong><small>{apiOnline ? "All data is up to date" : "Local preview mode"}</small></span><span className={`online-dot ${apiOnline ? "" : "dot-muted"}`} /></div><button className="profile-button"><span className="avatar">AM</span><span><strong>{user.name || "Alex Morgan"}</strong><small>{user.role?.replaceAll("_", " ") || "Municipal Officer"}</small></span><ChevronDown size={14} /></button></div>
     </aside>
     {mobileNav && <button className="nav-scrim" aria-label="Close menu" onClick={() => setMobileNav(false)} />}
-    <main className="main-area"><header className="topbar"><div className="topbar-left"><button className="mobile-menu" onClick={() => setMobileNav(true)}><Menu size={20} /></button><span className="breadcrumb">Workspace <ChevronRight size={14} /> <PageIcon size={15} /> <strong>{page}</strong></span></div><div className="topbar-actions"><div className="global-search-wrap" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setSearchFocused(false); }}><label className="global-search"><Search size={16} /><input ref={searchInputRef} aria-label="Search reports and crops" aria-expanded={searchFocused && Boolean(search)} aria-controls="global-search-results" placeholder="Search reports, crops..." value={search} onFocus={() => setSearchFocused(true)} onChange={(e) => setSearch(e.target.value)} onKeyDown={(event) => { if (event.key === "Escape") setSearchFocused(false); if (event.key === "Enter" && search.trim()) openSearchResult(); }} /><kbd>⌘ K</kbd>{search && <button className="search-clear" type="button" aria-label="Clear search" onClick={() => setSearch("")}><X size={14} /></button>}</label>{searchFocused && search.trim() && <div className="search-results" id="global-search-results" role="listbox" aria-label="Matching field reports">{searchResults.length ? searchResults.map((report) => <button className="search-result" key={report.id} role="option" aria-selected="false" onMouseDown={(event) => event.preventDefault()} onClick={openSearchResult}><span className="search-result-main"><strong>{report.farmer}</strong><small>{report.crop} · {report.barangay}</small></span><span className={`search-result-status status-${report.status}`}>{report.status === "submitted" ? "For review" : report.status}</span></button>) : <div className="search-no-results">No matching field reports</div>}<button className="search-all-results" onMouseDown={(event) => event.preventDefault()} onClick={openSearchResult}>View filtered results <ChevronRight size={14} /></button></div>}</div><button className="top-icon" onClick={() => setPage("Notifications")} aria-label="Notifications"><Bell size={18} /><i /></button><span className="top-divider" /><button className="top-avatar" title="Sign out" onClick={signOut}>AM</button></div></header>
+    <main className="main-area">{apiError && <div className="error-box" role="alert">Dashboard data could not be refreshed: {apiError}</div>}<header className="topbar"><div className="topbar-left"><button className="mobile-menu" onClick={() => setMobileNav(true)}><Menu size={20} /></button><span className="breadcrumb">Workspace <ChevronRight size={14} /> <PageIcon size={15} /> <strong>{page}</strong></span></div><div className="topbar-actions"><div className="global-search-wrap" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setSearchFocused(false); }}><label className="global-search"><Search size={16} /><input ref={searchInputRef} aria-label="Search reports and crops" aria-expanded={searchFocused && Boolean(search)} aria-controls="global-search-results" placeholder="Search reports, crops..." value={search} onFocus={() => setSearchFocused(true)} onChange={(e) => setSearch(e.target.value)} onKeyDown={(event) => { if (event.key === "Escape") setSearchFocused(false); if (event.key === "Enter" && search.trim()) openSearchResult(); }} /><kbd>⌘ K</kbd>{search && <button className="search-clear" type="button" aria-label="Clear search" onClick={() => setSearch("")}><X size={14} /></button>}</label>{searchFocused && search.trim() && <div className="search-results" id="global-search-results" role="listbox" aria-label="Matching field reports">{searchResults.length ? searchResults.map((report) => <button className="search-result" key={report.id} role="option" aria-selected="false" onMouseDown={(event) => event.preventDefault()} onClick={openSearchResult}><span className="search-result-main"><strong>{report.farmer}</strong><small>{report.crop} · {report.barangay}</small></span><span className={`search-result-status status-${report.status}`}>{report.status === "submitted" ? "For review" : report.status}</span></button>) : <div className="search-no-results">No matching field reports</div>}<button className="search-all-results" onMouseDown={(event) => event.preventDefault()} onClick={openSearchResult}>View filtered results <ChevronRight size={14} /></button></div>}</div><button className="top-icon" onClick={() => setPage("Notifications")} aria-label="Notifications"><Bell size={18} /><i /></button><span className="top-divider" /><button className="top-avatar" title="Sign out" onClick={signOut}>AM</button></div></header>
       {page === "Dashboard" && <DashboardHome reports={reports} forecasts={forecasts} locations={barangayLocations} boundaries={boundaryFeatures} selectedBarangay={selectedBarangay} setSelectedBarangay={setSelected} setPage={setPage} />}
       {page === "Field reports" && <ReportsPage reports={reports} crops={cropCatalog} onReview={review} onNew={() => setModal(true)} onExport={exportData} apiOnline={apiOnline} searchQuery={search.trim()} />}
       {page === "Forecasting" && <ForecastPage forecasts={forecasts} onExport={exportData} />}

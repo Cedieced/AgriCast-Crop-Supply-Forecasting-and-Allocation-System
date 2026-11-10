@@ -1,5 +1,3 @@
-USE crop_supply;
-
 DROP TRIGGER IF EXISTS audit_field_reports_insert;
 DROP TRIGGER IF EXISTS audit_field_reports_update;
 DROP TRIGGER IF EXISTS audit_field_reports_delete;

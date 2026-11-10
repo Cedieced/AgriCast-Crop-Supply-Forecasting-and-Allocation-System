@@ -1,10 +1,6 @@
 # AgriCast — Crop Supply Forecasting and Allocation System
 
-<<<<<<< HEAD
 An MVP for the Municipal Agriculture Office of Boac, Marinduque. The workspace contains a React dashboard, an Express/MySQL API, and a Flutter field-app foundation designed for offline data capture.
-=======
-An MVP for the Municipal Agriculture Office of Boac, Marinduque. The workspace contains a React dashboard, an Express/MySql API, and a Flutter field-app foundation designed for offline data capture.
->>>>>>> 24f24742e04ba26c61b5047a33e9b6802ab6fe09
 
 ## Project layout
 
@@ -44,6 +40,6 @@ The MySQL database is a new database; existing PostgreSQL data is not copied aut
 
 ## Security and deployment
 
-Configure strong secrets, HTTPS, managed MySQL backups, restricted CORS origins, and a production identity/password policy before deployment. Demo accounts are created on first API startup; change or disable them before exposing the service. See `docs/system-design.md` for the module boundaries and data model.
+Configure strong secrets, HTTPS, managed MySQL backups, restricted CORS origins, and a production identity/password policy before deployment. Development demo accounts and sample data are not created in production. See the [Vercel deployment guide](./docs/vercel-deployment.md) for production setup and verification, and `docs/system-design.md` for module boundaries and the data model.
 "# AgriCast-Crop-Supply-Forecasting-and-Allocation-System-for-Boac-Marinduque" 
 "# AgriCast-Crop-Supply-Forecasting-and-Allocation-System-for-Boac-Marinduque" 

@@ -1,9 +1,14 @@
 .env
 .DS_Store
+.env
+.env.*
+!.env.example
+!**/.env.example
 backend/node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/.vercel/
 mobile/.dart_tool/
 mobile/.flutter-plugins
 mobile/.flutter-plugins-dependencies

@@ -6,7 +6,11 @@ export function requireAuth(req, res, next) {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
   if (!token) return res.status(401).json({ error: "Authentication required" });
   try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = jwt.verify(token, process.env.JWT_SECRET, {
+      algorithms: ["HS256"],
+      issuer: "agricast-api",
+      audience: "agricast-clients",
+    });
     next();
   } catch {
     return res.status(401).json({ error: "Invalid or expired token" });

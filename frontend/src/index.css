@@ -76,14 +76,10 @@ small{
   font-weight:800;
   letter-spacing:-.06em
 }
-.brand-icon{
-  height:34px;
-  width:34px;
-  display:grid;
-  place-items:center;
-  border-radius:11px;
-  background:#e7f2e7;
-  color:#34804b
+.sidebar-brand .brand-logo{
+  width:168px;
+  max-width:100%;
+  height:auto
 }
 .sidebar-brand small{
   font-family:"DM Sans",sans-serif;
@@ -1726,25 +1722,21 @@ tbody tr:last-child td{
 .visual-brand{
   display:flex;
   align-items:center;
-  gap:10px;
+  justify-content:center;
   font-family:Manrope;
   font-weight:800;
   font-size:18px;
   letter-spacing:-.05em;
   z-index:1
 }
-.visual-brand .brand-icon{
-  background:#ffffff20;
-  color:#d9eed8
-}
-.brand-tag{
-  font-family:"DM Sans";
-  font-size:8px;
-  letter-spacing:.1em;
-  background:#ffffff1a;
-  border-radius:4px;
-  padding:4px 6px;
-  margin-left:1px
+.visual-brand .brand-logo{
+  width:340px;
+  max-width:75vw;
+  height:auto;
+  padding:12px 16px;
+  border-radius:12px;
+  background:#f8f9f1;
+  box-shadow:0 8px 24px #10281d40
 }
 .visual-copy{
   max-width:460px;
@@ -1794,10 +1786,19 @@ tbody tr:last-child td{
 .login-mobile-brand{
   display:none;
   align-items:center;
+  justify-content:center;
   gap:8px;
   font-family:Manrope;
   font-weight:800;
   margin-bottom:35px
+}
+.login-mobile-brand .brand-logo{
+  width:250px;
+  max-width:100%;
+  height:auto;
+  padding:10px 14px;
+  border-radius:10px;
+  background:#f8f9f1
 }
 .login-form .eyebrow{
   color:#588361

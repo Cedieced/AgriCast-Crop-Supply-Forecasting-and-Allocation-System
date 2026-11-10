@@ -25,8 +25,12 @@ String resolveApiBaseUrl({
   String override = '',
   bool debugBuild = kDebugMode,
 }) {
-  if (override.isNotEmpty) return override;
+  if (override.isNotEmpty) {
+    if (!debugBuild && Uri.tryParse(override)?.scheme != 'https') return '';
+    return override;
+  }
   if (isWeb) {
+    if (!debugBuild) return '';
     final scheme = currentUri.scheme == 'https' ? 'https' : 'http';
     return Uri(
             scheme: scheme,
@@ -1429,20 +1433,13 @@ class _ReportFormState extends State<ReportForm> {
 class _BrandMark extends StatelessWidget {
   const _BrandMark();
   @override
-  Widget build(BuildContext context) =>
-      Row(mainAxisSize: MainAxisSize.min, children: [
-        Container(
-            width: 34,
-            height: 34,
-            decoration: BoxDecoration(
-                color: const Color(0xFFE7F2E7),
-                borderRadius: BorderRadius.circular(11)),
-            child: const Icon(Icons.spa_outlined, color: green)),
-        const SizedBox(width: 9),
-        const Text('AgriCast',
-            style: TextStyle(
-                fontSize: 19, fontWeight: FontWeight.w800, letterSpacing: -1)),
-      ]);
+  Widget build(BuildContext context) => Image.asset(
+        'assets/agricast-logo.png',
+        width: 160,
+        height: 32,
+        fit: BoxFit.contain,
+        semanticLabel: 'AgriCast',
+      );
 }
 
 class _SummaryCard extends StatelessWidget {
