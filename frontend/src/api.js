@@ -1,8 +1,11 @@
-const API_URL = (import.meta.env.VITE_API_URL || "").trim().replace(/\/+$/, "");
+const API_URL = (import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "/api" : "")).trim().replace(/\/+$/, "");
 
 function requireApiUrl() {
   if (!API_URL) {
     throw new Error("The API URL is not configured. Set VITE_API_URL to the deployed API base URL.");
+  }
+  if (import.meta.env.DEV && API_URL === "/api") {
+    return API_URL;
   }
   const parsedUrl = new URL(API_URL);
   if (!parsedUrl.pathname.endsWith("/api") || parsedUrl.search || parsedUrl.hash) {

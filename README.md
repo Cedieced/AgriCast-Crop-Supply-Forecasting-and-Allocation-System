@@ -22,9 +22,9 @@ Requirements: Node.js 20+, npm, MySQL 8+ (or Docker Desktop), MySQL Workbench, a
 5. Start the API: `cd backend; npm install; npm run dev`
 6. Start the web dashboard: `cd frontend; npm install; npm run dev`
 7. Start the field app in Chrome: `cd mobile; flutter pub get; flutter run -d chrome --web-port 5174`.
-8. Open `http://localhost:5173` for the dashboard and `http://localhost:5174` for the field app. Both use the API at `http://localhost:4000/api`. The seeded web demo account is `admin@boac.gov.ph` / `BoacDemo123!`.
+8. Open `http://localhost:5173` for the dashboard and `http://localhost:5174` for the field app. On the same computer, both use the API at `http://localhost:4000/api`. The seeded web demo account is `admin@boac.gov.ph` / `BoacDemo123!`.
 
-In VS Code, run the `Start AgriCast Services` task to start the API and both browser apps together. For access from another device on the same Wi-Fi, open both browser apps using the computer's LAN IP (currently `10.0.10.85`) and allow inbound TCP ports 4000, 5173, and 5174 through Windows Firewall on a trusted private network. The API CORS allowlist in `.env` must include the exact browser origin; restart the API after changing `.env`. Do not expose MySQL port 3306 to the device or the public network.
+In VS Code, run the `Start AgriCast Services` task to start the API and both browser apps together. For dashboard access from another device on the same Wi-Fi, open it using the computer's LAN IP and allow inbound TCP port 5173 through Windows Firewall on a trusted private network. The dashboard uses Vite's same-origin `/api` proxy to reach the API on the host computer, so the remote browser must not use `localhost` as the API address. The Flutter field app connects directly to the API; configure its `API_BASE_URL` with the host's LAN IP, allow inbound TCP ports 4000 and 5174, and include the field-app browser origin in `.env`'s `WEB_ORIGIN`. Restart the API after changing `.env`. Do not expose MySQL port 3306 to the device or the public network.
 
 The API initializes the schema, audit triggers, and sample data on startup. It listens on port 4000 by default. In Workbench, refresh the `crop_supply` schema after the API starts to see its tables and data.
 
