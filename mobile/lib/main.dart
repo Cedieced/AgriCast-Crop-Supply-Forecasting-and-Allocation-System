@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
-import 'package:flutter/foundation.dart' show kDebugMode, kIsWeb;
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:geolocator/geolocator.dart';
@@ -16,7 +16,7 @@ import 'package:uuid/uuid.dart';
 const configuredApiBaseUrl = String.fromEnvironment('API_BASE_URL');
 const localDevelopmentApiBaseUrl = String.fromEnvironment(
   'LOCAL_API_BASE_URL',
-  defaultValue: 'http://10.0.10.85:4000/api',
+  defaultValue: 'http://192.168.2.9:4000/api',
 );
 
 String resolveApiBaseUrl({
@@ -48,7 +48,29 @@ String get apiBaseUrl => resolveApiBaseUrl(
       override: configuredApiBaseUrl,
     );
 
-const green = Color(0xFF34764A);
+const green = Color(0xFF2F7141);
+const canvasColor = Color(0xFFF4F7F3);
+const surfaceColor = Color(0xFFFFFFFF);
+const inkColor = Color(0xFF20342A);
+const mutedColor = Color(0xFF5F7064);
+const outlineColor = Color(0xFFDCE6DC);
+const softGreenColor = Color(0xFFEAF4E9);
+const warningColor = Color(0xFF8A5C00);
+const warningSurfaceColor = Color(0xFFFFF4D8);
+const errorColor = Color(0xFFA83D35);
+const errorSurfaceColor = Color(0xFFFBECEB);
+
+num? readNum(Object? value) =>
+    value is num ? value : num.tryParse(value?.toString() ?? '');
+
+int? readInt(Object? value) =>
+    value is int ? value : int.tryParse(value?.toString() ?? '');
+
+double? readDouble(Object? value) =>
+    value is double ? value : double.tryParse(value?.toString() ?? '');
+
+String? readString(Object? value) => value?.toString();
+
 const crops = <String, Map<String, num>>{
   'Rice': {'maturity': 120, 'yield': 4500, 'perCapita': 115},
   'Corn': {'maturity': 110, 'yield': 4200, 'perCapita': 18},
@@ -64,6 +86,28 @@ List<Map<String, Object?>> defaultCropCatalog() => crops.entries
           'per_capita_kg_year': entry.value['perCapita'],
         })
     .toList();
+
+List<Map<String, Object?>> mergeCropCatalog(
+    List<List<Map<String, Object?>>> catalogGroups) {
+  final merged = <String, Map<String, Object?>>{};
+  for (final group in catalogGroups) {
+    for (final item in group) {
+      final name = readString(item['name'])?.trim();
+      if (name == null || name.isEmpty) continue;
+      merged[name] = <String, Object?>{
+        'name': name,
+        'average_yield_kg_ha': readNum(item['average_yield_kg_ha']) ?? 0,
+        'maturity_days': readInt(item['maturity_days']) ?? 0,
+        'per_capita_kg_year': readNum(item['per_capita_kg_year']) ?? 0,
+      };
+    }
+  }
+  final result = merged.values.toList();
+  result.sort((left, right) => (readString(left['name']) ?? '')
+      .compareTo(readString(right['name']) ?? ''));
+  return result;
+}
+
 const barangays = [
   'Agot',
   'Agumaymayan',
@@ -143,6 +187,37 @@ Future<void> createLocalCropCatalog(DatabaseExecutor db) async {
   }
 }
 
+Future<void> migrateLocalCropCatalog(DatabaseExecutor db) async {
+  final tables = await db.rawQuery(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'crop_catalog'");
+  if (tables.isEmpty) {
+    await createLocalCropCatalog(db);
+    return;
+  }
+
+  final columns = await db.rawQuery('PRAGMA table_info(crop_catalog)');
+  if (columns.any((column) => column['name'] == 'maturity_days')) return;
+
+  await db.execute(
+      'ALTER TABLE crop_catalog ADD COLUMN maturity_days INTEGER NOT NULL DEFAULT 0');
+  for (final crop in defaultCropCatalog()) {
+    await db.update(
+      'crop_catalog',
+      {'maturity_days': crop['maturity_days']},
+      where: 'name = ? AND maturity_days = 0',
+      whereArgs: [crop['name']],
+    );
+  }
+}
+
+Future<void> upgradeLocalDatabase(DatabaseExecutor db, int oldVersion) async {
+  if (oldVersion < 2) await createLocalCropCatalog(db);
+  if (oldVersion < 3) {
+    await db.execute('ALTER TABLE reports ADD COLUMN maturity_days INTEGER');
+  }
+  if (oldVersion < 4) await migrateLocalCropCatalog(db);
+}
+
 Future<Database> openLocalDatabase() async {
   final String path;
   if (kIsWeb) {
@@ -151,8 +226,10 @@ Future<Database> openLocalDatabase() async {
   } else {
     path = p.join(await getDatabasesPath(), 'agriflow.db');
   }
-  return openDatabase(path, version: 3, onCreate: (db, _) async {
-    await db.execute('''
+  return openDatabase(path,
+      version: 4,
+      onCreate: (db, _) async {
+        await db.execute('''
       CREATE TABLE reports (
         id TEXT PRIMARY KEY, farmer_name TEXT NOT NULL, barangay_name TEXT NOT NULL,
         crop_name TEXT NOT NULL, area_ha REAL NOT NULL, planting_date TEXT NOT NULL,
@@ -161,15 +238,9 @@ Future<Database> openLocalDatabase() async {
         sync_state TEXT NOT NULL DEFAULT 'queued', created_at TEXT NOT NULL
       )
     ''');
-    await createLocalCropCatalog(db);
-  }, onUpgrade: (db, oldVersion, _) async {
-    if (oldVersion < 2) {
-      await createLocalCropCatalog(db);
-    }
-    if (oldVersion < 3) {
-      await db.execute('ALTER TABLE reports ADD COLUMN maturity_days INTEGER');
-    }
-  });
+        await createLocalCropCatalog(db);
+      },
+      onUpgrade: (db, oldVersion, _) => upgradeLocalDatabase(db, oldVersion));
 }
 
 class FieldApi {
@@ -335,10 +406,9 @@ class FieldApi {
       if (item is! Map<String, dynamic>) {
         throw Exception('The crop catalog contains an invalid crop.');
       }
-      final yield = num.tryParse(item['average_yield_kg_ha']?.toString() ?? '');
-      final maturity = int.tryParse(item['maturity_days']?.toString() ?? '');
-      final perCapita =
-          num.tryParse(item['per_capita_kg_year']?.toString() ?? '');
+      final yield = readNum(item['average_yield_kg_ha']);
+      final maturity = readInt(item['maturity_days']);
+      final perCapita = readNum(item['per_capita_kg_year']);
       if (item['name'] is! String || yield == null || maturity == null) {
         throw Exception('The crop catalog contains an incomplete crop.');
       }
@@ -387,11 +457,9 @@ class FieldApi {
     }
     return <String, Object?>{
       'name': decoded['name'],
-      'average_yield_kg_ha':
-          num.tryParse(decoded['average_yield_kg_ha']?.toString() ?? ''),
-      'maturity_days': int.tryParse(decoded['maturity_days']?.toString() ?? ''),
-      'per_capita_kg_year':
-          num.tryParse(decoded['per_capita_kg_year']?.toString() ?? '') ?? 0,
+      'average_yield_kg_ha': readNum(decoded['average_yield_kg_ha']),
+      'maturity_days': readInt(decoded['maturity_days']),
+      'per_capita_kg_year': readNum(decoded['per_capita_kg_year']) ?? 0,
     };
   }
 
@@ -428,16 +496,16 @@ class FieldApi {
         'farmer_name': item['farmer_name'],
         'barangay_name': item['barangay_name'],
         'crop_name': item['crop_name'],
-        'area_ha': num.tryParse(item['area_ha']?.toString() ?? ''),
-        'planting_date': item['planting_date']?.toString(),
+        'area_ha': readNum(item['area_ha']),
+        'planting_date': readString(item['planting_date']),
         'planting_method': item['planting_method'],
-        'maturity_days': int.tryParse(item['maturity_days']?.toString() ?? ''),
-        'latitude': num.tryParse(item['latitude']?.toString() ?? ''),
-        'longitude': num.tryParse(item['longitude']?.toString() ?? ''),
+        'maturity_days': readInt(item['maturity_days']),
+        'latitude': readNum(item['latitude']),
+        'longitude': readNum(item['longitude']),
         'status': item['status'],
         'sync_state': 'synced',
         'created_at':
-            item['created_at']?.toString() ?? DateTime.now().toIso8601String(),
+            readString(item['created_at']) ?? DateTime.now().toIso8601String(),
       };
     }).toList();
   }
@@ -590,17 +658,150 @@ class _AgriFlowAppState extends State<AgriFlowApp> {
         theme: ThemeData(
           useMaterial3: true,
           colorScheme: ColorScheme.fromSeed(
-              seedColor: green, surface: const Color(0xFFF7F9F5)),
-          scaffoldBackgroundColor: const Color(0xFFF7F9F5),
+            seedColor: green,
+            surface: surfaceColor,
+          ).copyWith(
+            primary: green,
+            onPrimary: Colors.white,
+            onSurface: inkColor,
+            error: errorColor,
+            onError: Colors.white,
+          ),
+          scaffoldBackgroundColor: canvasColor,
+          textTheme: const TextTheme(
+            titleLarge: TextStyle(
+              color: inkColor,
+              fontSize: 24,
+              fontWeight: FontWeight.w800,
+              height: 1.2,
+            ),
+            titleMedium: TextStyle(
+              color: inkColor,
+              fontSize: 18,
+              fontWeight: FontWeight.w700,
+            ),
+            bodyLarge: TextStyle(color: inkColor, fontSize: 16),
+            bodyMedium: TextStyle(color: inkColor, fontSize: 14),
+            bodySmall: TextStyle(color: mutedColor, fontSize: 12),
+            labelLarge: TextStyle(
+              color: inkColor,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          appBarTheme: const AppBarTheme(
+            backgroundColor: canvasColor,
+            foregroundColor: inkColor,
+            surfaceTintColor: Colors.transparent,
+            elevation: 0,
+            scrolledUnderElevation: 1,
+            titleTextStyle: TextStyle(
+              color: inkColor,
+              fontSize: 18,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          cardTheme: CardThemeData(
+            color: surfaceColor,
+            elevation: 0,
+            margin: EdgeInsets.zero,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: const BorderSide(color: outlineColor),
+            ),
+          ),
           inputDecorationTheme: InputDecorationTheme(
             filled: true,
-            fillColor: Colors.white,
+            fillColor: surfaceColor,
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 15),
+            labelStyle: const TextStyle(color: mutedColor, fontSize: 14),
+            floatingLabelStyle: const TextStyle(
+              color: green,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+            hintStyle: const TextStyle(color: mutedColor, fontSize: 14),
+            errorStyle: const TextStyle(color: errorColor, fontSize: 12),
             border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(color: Color(0xFFE2E9E0))),
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: outlineColor),
+            ),
             enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: outlineColor),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: green, width: 1.5),
+            ),
+            errorBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: errorColor),
+            ),
+            focusedErrorBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: errorColor, width: 1.5),
+            ),
+          ),
+          filledButtonTheme: FilledButtonThemeData(
+            style: FilledButton.styleFrom(
+              minimumSize: const Size(48, 48),
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+              shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(color: Color(0xFFE2E9E0))),
+              ),
+              textStyle:
+                  const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+            ),
+          ),
+          outlinedButtonTheme: OutlinedButtonThemeData(
+            style: OutlinedButton.styleFrom(
+              minimumSize: const Size(48, 48),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              foregroundColor: green,
+              side: const BorderSide(color: outlineColor),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              textStyle:
+                  const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+            ),
+          ),
+          textButtonTheme: TextButtonThemeData(
+            style: TextButton.styleFrom(
+              minimumSize: const Size(48, 44),
+              foregroundColor: green,
+              textStyle:
+                  const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+          ),
+          iconButtonTheme: IconButtonThemeData(
+            style: IconButton.styleFrom(
+              minimumSize: const Size(48, 48),
+              foregroundColor: mutedColor,
+            ),
+          ),
+          floatingActionButtonTheme: FloatingActionButtonThemeData(
+            backgroundColor: green,
+            foregroundColor: Colors.white,
+            elevation: 3,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+          ),
+          snackBarTheme: SnackBarThemeData(
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: inkColor,
+            contentTextStyle:
+                const TextStyle(color: Colors.white, fontSize: 14),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+          progressIndicatorTheme: const ProgressIndicatorThemeData(
+            color: green,
+            linearTrackColor: softGreenColor,
           ),
         ),
         home: checkingSession
@@ -641,14 +842,40 @@ class ApiUnavailablePage extends StatelessWidget {
                 children: [
                   const _BrandMark(),
                   const SizedBox(height: 24),
-                  const Text(
-                    'Unable to connect',
-                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                  Container(
+                    width: 64,
+                    height: 64,
+                    decoration: BoxDecoration(
+                      color: warningSurfaceColor,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: const Icon(
+                      Icons.cloud_off_outlined,
+                      color: warningColor,
+                      size: 30,
+                    ),
                   ),
+                  const SizedBox(height: 18),
+                  const Text('Unable to connect',
+                      style: TextStyle(
+                          color: inkColor,
+                          fontSize: 24,
+                          fontWeight: FontWeight.w700)),
                   const SizedBox(height: 8),
-                  Text(message, textAlign: TextAlign.center),
+                  Semantics(
+                    liveRegion: true,
+                    child: Text(
+                      message,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: mutedColor, fontSize: 14),
+                    ),
+                  ),
                   const SizedBox(height: 20),
-                  FilledButton(onPressed: onRetry, child: const Text('Retry')),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                        onPressed: onRetry, child: const Text('Retry')),
+                  ),
                 ],
               ),
             ),
@@ -713,7 +940,21 @@ class _LoginPageState extends State<LoginPage> {
                 child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
           child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Container(
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: surfaceColor,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: outlineColor),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x0F20342A),
+                    blurRadius: 28,
+                    offset: Offset(0, 10),
+                  ),
+                ],
+              ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -723,30 +964,86 @@ class _LoginPageState extends State<LoginPage> {
                       style:
                           TextStyle(fontSize: 26, fontWeight: FontWeight.w800)),
                   const SizedBox(height: 24),
-                  TextField(
-                      controller: email,
-                      keyboardType: TextInputType.emailAddress,
-                      decoration:
-                          const InputDecoration(labelText: 'Email address')),
-                  const SizedBox(height: 14),
-                  TextField(
-                      controller: password,
-                      obscureText: true,
-                      decoration: const InputDecoration(labelText: 'Password')),
+                  AutofillGroup(
+                    child: Column(
+                      children: [
+                        TextField(
+                          controller: email,
+                          keyboardType: TextInputType.emailAddress,
+                          textInputAction: TextInputAction.next,
+                          autofillHints: const [AutofillHints.username],
+                          decoration: const InputDecoration(
+                            labelText: 'Email address',
+                            prefixIcon: Icon(Icons.email_outlined),
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        TextField(
+                          controller: password,
+                          obscureText: true,
+                          textInputAction: TextInputAction.done,
+                          autofillHints: const [AutofillHints.password],
+                          onSubmitted: (_) {
+                            if (!busy) unawaited(submit());
+                          },
+                          decoration: const InputDecoration(
+                            labelText: 'Password',
+                            prefixIcon: Icon(Icons.lock_outline),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                   if (error != null)
                     Padding(
-                        padding: const EdgeInsets.only(top: 12),
-                        child: Text(error!,
-                            style: const TextStyle(color: Colors.red))),
+                      padding: const EdgeInsets.only(top: 14),
+                      child: Semantics(
+                        liveRegion: true,
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: errorSurfaceColor,
+                            border: Border.all(color: const Color(0xFFF1D8D5)),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(Icons.error_outline,
+                                  color: errorColor, size: 20),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(error!,
+                                    style: const TextStyle(
+                                        color: errorColor, fontSize: 13)),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
                   const SizedBox(height: 20),
                   SizedBox(
-                      width: double.infinity,
-                      height: 50,
-                      child: FilledButton(
-                          onPressed: busy ? null : submit,
-                          child: Text(busy ? 'Signing in…' : 'Sign in'))),
+                    width: double.infinity,
+                    child: FilledButton(
+                      onPressed: busy ? null : submit,
+                      child: busy
+                          ? const SizedBox(
+                              height: 20,
+                              width: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Text('Sign in'),
+                    ),
+                  ),
                 ],
-              )),
+              ),
+            ),
+          ),
         ))),
       );
 }
@@ -770,6 +1067,8 @@ class FieldHome extends StatefulWidget {
 class _FieldHomeState extends State<FieldHome> {
   StreamSubscription<List<ConnectivityResult>>? subscription;
   List<Map<String, Object?>> reports = [];
+  bool loadingReports = true;
+  String? reportLoadError;
   bool online = false;
   bool syncing = false;
   String? syncError;
@@ -799,9 +1098,24 @@ class _FieldHomeState extends State<FieldHome> {
   }
 
   Future<void> refresh() async {
-    final db = await widget.database;
-    final rows = await db.query('reports', orderBy: 'created_at DESC');
-    if (mounted) setState(() => reports = rows);
+    try {
+      final db = await widget.database;
+      final rows = await db.query('reports', orderBy: 'created_at DESC');
+      if (mounted) {
+        setState(() {
+          reports = rows;
+          reportLoadError = null;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          reportLoadError = error.toString().replaceFirst('Exception: ', '');
+        });
+      }
+    } finally {
+      if (mounted) setState(() => loadingReports = false);
+    }
   }
 
   Future<void> saveReport(Map<String, Object?> report) async {
@@ -813,45 +1127,51 @@ class _FieldHomeState extends State<FieldHome> {
   }
 
   Future<void> syncQueued() async {
-    if (syncing) return;
+    if (syncing || !mounted) return;
     setState(() => syncing = true);
     syncError = null;
-    final db = await widget.database;
-    final queued = await db.query('reports',
-        where: "sync_state = 'queued' AND status = 'submitted'");
-    for (final report in queued) {
-      try {
-        await widget.api.sync(report);
-        await db.update('reports', {'sync_state': 'synced'},
-            where: 'id = ?', whereArgs: [report['id']]);
-        syncError = null;
-      } catch (error) {
-        if (error is SessionExpiredException) {
-          await widget.onSessionExpired();
-          return;
+    var sessionExpired = false;
+    try {
+      final db = await widget.database;
+      final queued = await db.query('reports',
+          where: "sync_state = 'queued' AND status = 'submitted'");
+      for (final report in queued) {
+        try {
+          await widget.api.sync(report);
+          await db.update('reports', {'sync_state': 'synced'},
+              where: 'id = ?', whereArgs: [report['id']]);
+          syncError = null;
+        } catch (error) {
+          if (error is SessionExpiredException) {
+            sessionExpired = true;
+            await widget.onSessionExpired();
+            return;
+          }
+          syncError = error.toString().replaceFirst('Exception: ', '');
+          break;
         }
-        syncError = error.toString().replaceFirst('Exception: ', '');
-        break;
       }
-    }
-    if (syncError == null) {
-      try {
-        final serverReports = await widget.api.fetchReports();
-        for (final report in serverReports) {
-          await db.insert('reports', report,
-              conflictAlgorithm: ConflictAlgorithm.replace);
+      if (syncError == null) {
+        try {
+          final serverReports = await widget.api.fetchReports();
+          for (final report in serverReports) {
+            await db.insert('reports', report,
+                conflictAlgorithm: ConflictAlgorithm.replace);
+          }
+        } catch (error) {
+          if (error is SessionExpiredException) {
+            sessionExpired = true;
+            await widget.onSessionExpired();
+            return;
+          }
+          syncError = error.toString().replaceFirst('Exception: ', '');
         }
-      } catch (error) {
-        if (error is SessionExpiredException) {
-          await widget.onSessionExpired();
-          return;
-        }
-        syncError = error.toString().replaceFirst('Exception: ', '');
       }
-    }
-    if (mounted) {
-      setState(() => syncing = false);
-      await refresh();
+    } catch (error) {
+      syncError = error.toString().replaceFirst('Exception: ', '');
+    } finally {
+      if (mounted) setState(() => syncing = false);
+      if (mounted && !sessionExpired) await refresh();
     }
   }
 
@@ -863,6 +1183,33 @@ class _FieldHomeState extends State<FieldHome> {
         .length;
     final submitted =
         reports.where((item) => item['status'] == 'submitted').length;
+    final syncTitle = syncError != null
+        ? 'Sync failed'
+        : syncing
+            ? 'Syncing reports'
+            : !online
+                ? 'Offline mode'
+                : queued > 0
+                    ? 'Ready to sync'
+                    : 'Synced';
+    final syncDetail = syncError ??
+        (syncing
+            ? 'Sending reports securely…'
+            : !online
+                ? '$queued report${queued == 1 ? '' : 's'} saved on this device'
+                : queued > 0
+                    ? '$queued report${queued == 1 ? '' : 's'} waiting to sync'
+                    : 'All submitted reports are up to date');
+    final syncTone = syncError != null
+        ? errorColor
+        : !online || queued > 0
+            ? warningColor
+            : green;
+    final syncSurface = syncError != null
+        ? errorSurfaceColor
+        : !online || queued > 0
+            ? warningSurfaceColor
+            : softGreenColor;
     return Scaffold(
       appBar: AppBar(
         title: const _BrandMark(),
@@ -879,54 +1226,81 @@ class _FieldHomeState extends State<FieldHome> {
             if (online) await syncQueued();
           },
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(18, 12, 18, 100),
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 112),
             children: [
               Container(
-                padding: const EdgeInsets.all(14),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                 decoration: BoxDecoration(
-                    color: online
-                        ? const Color(0xFFEAF4E9)
-                        : const Color(0xFFFFF3E2),
-                    borderRadius: BorderRadius.circular(14)),
+                  color: syncSurface,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: syncError != null
+                        ? const Color(0xFFF1D8D5)
+                        : !online || queued > 0
+                            ? const Color(0xFFE9D9B6)
+                            : const Color(0xFFD8E8D8),
+                  ),
+                ),
                 child: Row(children: [
-                  Icon(
-                      online
-                          ? Icons.cloud_done_outlined
-                          : Icons.cloud_off_outlined,
-                      color: online ? green : Colors.orange.shade800),
-                  const SizedBox(width: 10),
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: surfaceColor.withValues(alpha: 0.75),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(
+                      syncError != null
+                          ? Icons.cloud_off_outlined
+                          : syncing
+                              ? Icons.sync
+                              : !online
+                                  ? Icons.cloud_off_outlined
+                                  : queued > 0
+                                      ? Icons.cloud_upload_outlined
+                                      : Icons.cloud_done_outlined,
+                      color: syncTone,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
                   Expanded(
                       child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                        Text(online ? 'You’re online' : 'Offline mode',
-                            style:
-                                const TextStyle(fontWeight: FontWeight.w700)),
-                        Text(
-                            syncError ??
-                                (syncing
-                                    ? 'Syncing field reports…'
-                                    : '$queued report${queued == 1 ? '' : 's'} waiting to sync'),
+                        Text(syncTitle,
                             style: TextStyle(
-                                fontSize: 12,
-                                color: syncError == null
-                                    ? const Color(0xFF748177)
-                                    : Colors.red.shade700)),
+                              color: syncTone,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                            )),
+                        const SizedBox(height: 3),
+                        Text(syncDetail,
+                            style: TextStyle(
+                              color:
+                                  syncError != null ? errorColor : mutedColor,
+                              fontSize: 12,
+                            )),
                       ])),
-                  if (online && queued > 0)
+                  if (online && (queued > 0 || syncError != null))
                     IconButton(
-                        onPressed: syncQueued,
-                        icon: const Icon(Icons.sync),
-                        tooltip: 'Sync now'),
+                      onPressed: syncing ? null : syncQueued,
+                      icon: const Icon(Icons.sync),
+                      tooltip: syncError != null ? 'Retry sync' : 'Sync now',
+                    ),
                 ]),
               ),
-              const SizedBox(height: 22),
+              const SizedBox(height: 24),
               const Text('Good day, Field Officer',
-                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
+                  style: TextStyle(
+                      color: inkColor,
+                      fontSize: 24,
+                      height: 1.2,
+                      fontWeight: FontWeight.w800)),
               const SizedBox(height: 5),
               const Text(
                   'Capture a farm visit. Your reports are stored securely on this device.',
-                  style: TextStyle(color: Color(0xFF748177))),
+                  style: TextStyle(color: mutedColor, fontSize: 14)),
               const SizedBox(height: 20),
               Row(children: [
                 Expanded(
@@ -948,7 +1322,39 @@ class _FieldHomeState extends State<FieldHome> {
                         TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                 TextButton(onPressed: refresh, child: const Text('Refresh')),
               ]),
-              if (reports.isEmpty)
+              if (loadingReports)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 28),
+                  child: Semantics(
+                    liveRegion: true,
+                    label: 'Loading field reports',
+                    child: const Center(child: CircularProgressIndicator()),
+                  ),
+                )
+              else if (reportLoadError != null)
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: errorSurfaceColor,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0xFFF1D8D5)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(reportLoadError!,
+                          style:
+                              const TextStyle(color: errorColor, fontSize: 13)),
+                      const SizedBox(height: 8),
+                      TextButton.icon(
+                        onPressed: refresh,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Try again'),
+                      ),
+                    ],
+                  ),
+                )
+              else if (reports.isEmpty)
                 const _EmptyReports()
               else
                 ...reports.map((report) => _ReportTile(report: report)),
@@ -969,109 +1375,6 @@ class _FieldHomeState extends State<FieldHome> {
       ),
     );
   }
-}
-
-class CropTypeDialog extends StatefulWidget {
-  const CropTypeDialog({super.key});
-
-  @override
-  State<CropTypeDialog> createState() => _CropTypeDialogState();
-}
-
-class _CropTypeDialogState extends State<CropTypeDialog> {
-  final formKey = GlobalKey<FormState>();
-  final name = TextEditingController();
-  final averageYield = TextEditingController();
-  final maturityDays = TextEditingController();
-  final perCapitaKgYear = TextEditingController(text: '0');
-
-  @override
-  void dispose() {
-    name.dispose();
-    averageYield.dispose();
-    maturityDays.dispose();
-    perCapitaKgYear.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => AlertDialog(
-        title: const Text('Add crop type'),
-        content: Form(
-          key: formKey,
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextFormField(
-                  controller: name,
-                  maxLength: 100,
-                  textCapitalization: TextCapitalization.words,
-                  decoration: const InputDecoration(labelText: 'Crop name *'),
-                  validator: (value) => value == null || value.trim().isEmpty
-                      ? 'Enter a crop name'
-                      : null,
-                ),
-                TextFormField(
-                  controller: averageYield,
-                  keyboardType:
-                      const TextInputType.numberWithOptions(decimal: true),
-                  decoration: const InputDecoration(
-                      labelText: 'Average yield (kg/ha) *'),
-                  validator: (value) {
-                    final parsed = double.tryParse(value ?? '');
-                    return parsed == null || parsed <= 0
-                        ? 'Enter a yield greater than 0'
-                        : null;
-                  },
-                ),
-                TextFormField(
-                  controller: maturityDays,
-                  keyboardType: TextInputType.number,
-                  decoration:
-                      const InputDecoration(labelText: 'Days to maturity *'),
-                  validator: (value) {
-                    final parsed = int.tryParse(value ?? '');
-                    return parsed == null || parsed < 1 || parsed > 3650
-                        ? 'Enter 1 to 3650 days'
-                        : null;
-                  },
-                ),
-                TextFormField(
-                  controller: perCapitaKgYear,
-                  keyboardType:
-                      const TextInputType.numberWithOptions(decimal: true),
-                  decoration: const InputDecoration(
-                      labelText: 'Consumption (kg/person/year)'),
-                  validator: (value) {
-                    final parsed = double.tryParse(value ?? '');
-                    return parsed == null || parsed < 0
-                        ? 'Enter 0 or a positive amount'
-                        : null;
-                  },
-                ),
-              ],
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel')),
-          FilledButton(
-            onPressed: () {
-              if (!formKey.currentState!.validate()) return;
-              Navigator.pop(context, <String, Object?>{
-                'name': name.text.trim(),
-                'average_yield_kg_ha': double.parse(averageYield.text),
-                'maturity_days': int.parse(maturityDays.text),
-                'per_capita_kg_year': double.parse(perCapitaKgYear.text),
-              });
-            },
-            child: const Text('Add crop'),
-          ),
-        ],
-      );
 }
 
 class ReportForm extends StatefulWidget {
@@ -1097,7 +1400,6 @@ class _ReportFormState extends State<ReportForm> {
   bool locating = false;
   bool saving = false;
   bool loadingCrops = false;
-  bool addingCrop = false;
   String? locationError;
   String? cropMessage;
 
@@ -1108,11 +1410,14 @@ class _ReportFormState extends State<ReportForm> {
         ),
       );
 
-  int get maturityDays => (selectedCrop['maturity_days'] as num).toInt();
-  num get averageYield => selectedCrop['average_yield_kg_ha'] as num;
+  int get maturityDays => (readNum(selectedCrop['maturity_days']) ?? 0).toInt();
+  num get averageYield => readNum(selectedCrop['average_yield_kg_ha']) ?? 0;
   DateTime get harvestDate => plantingDate.add(Duration(days: maturityDays));
   double get expectedKg =>
       (double.tryParse(area.text) ?? 0) * averageYield.toDouble();
+  bool get cropMessageIsWarning =>
+      cropMessage?.startsWith('Offline:') == true ||
+      cropMessage?.startsWith('All crop types loaded') == true;
 
   @override
   void initState() {
@@ -1122,81 +1427,94 @@ class _ReportFormState extends State<ReportForm> {
 
   Future<void> loadCropCatalog() async {
     setState(() => loadingCrops = true);
-    final db = await widget.database;
-    final cached = await db.query('crop_catalog', orderBy: 'name');
-    if (cached.isNotEmpty && mounted) {
-      setState(() {
-        cropCatalog = cached;
-        if (!cropCatalog.any((item) => item['name'] == crop)) {
-          crop = cropCatalog.first['name']! as String;
-        }
-      });
-    }
     try {
-      final remote = await widget.api.fetchCrops();
-      await db.transaction((transaction) async {
-        for (final item in remote) {
-          await transaction.insert('crop_catalog', item,
-              conflictAlgorithm: ConflictAlgorithm.replace);
-        }
-      });
+      Database? db;
+      List<Map<String, Object?>> cached = [];
+      Object? cacheReadError;
+      try {
+        db = await widget.database;
+        cached = await db.query('crop_catalog', orderBy: 'name');
+      } catch (error) {
+        cacheReadError = error;
+      }
+      final fallbackCatalog = mergeCropCatalog([
+        defaultCropCatalog(),
+        cached,
+      ]);
       if (mounted) {
         setState(() {
-          cropCatalog = remote;
-          if (remote.isNotEmpty &&
-              !remote.any((item) => item['name'] == crop)) {
-            crop = remote.first['name']! as String;
+          cropCatalog = fallbackCatalog;
+          if (!cropCatalog.any((item) => readString(item['name']) == crop)) {
+            final firstName = readString(cropCatalog.first['name']) ?? 'Rice';
+            crop = firstName;
+          }
+        });
+      }
+
+      late final List<Map<String, Object?>> remote;
+      try {
+        remote = await widget.api.fetchCrops();
+      } catch (error) {
+        if (mounted) {
+          setState(() {
+            final details = error.toString().replaceFirst('Exception: ', '');
+            cropMessage = cached.isEmpty
+                ? 'Could not load crop types: $details'
+                : 'Offline: using saved crop types. $details';
+          });
+        }
+        return;
+      }
+
+      final mergedCatalog = mergeCropCatalog([
+        defaultCropCatalog(),
+        cached,
+        remote,
+      ]);
+      if (mounted) {
+        setState(() {
+          cropCatalog = mergedCatalog;
+          if (!cropCatalog.any((item) => readString(item['name']) == crop)) {
+            final firstName = readString(cropCatalog.first['name']) ?? 'Rice';
+            crop = firstName;
           }
           cropMessage = null;
         });
       }
-    } catch (error) {
-      if (mounted) {
-        setState(() {
-          cropMessage = cached.isEmpty
-              ? 'Could not load crop types. Check your connection and retry.'
-              : 'Offline: using saved crop types.';
+
+      if (db == null) {
+        if (kDebugMode && cacheReadError != null) {
+          debugPrint('Could not read the local crop catalog: $cacheReadError');
+        }
+        if (mounted) {
+          setState(() {
+            cropMessage =
+                'All crop types loaded. Offline saving is temporarily unavailable.';
+          });
+        }
+        return;
+      }
+
+      try {
+        await db.transaction((transaction) async {
+          for (final item in remote) {
+            await transaction.insert('crop_catalog', item,
+                conflictAlgorithm: ConflictAlgorithm.replace);
+          }
         });
+      } catch (error) {
+        if (kDebugMode) {
+          debugPrint('Could not save the local crop catalog: $error');
+        }
+        if (mounted) {
+          setState(() {
+            cropMessage =
+                'All crop types loaded. Offline saving is temporarily unavailable.';
+          });
+        }
       }
     } finally {
       if (mounted) setState(() => loadingCrops = false);
-    }
-  }
-
-  Future<void> addCrop() async {
-    final details = await showDialog<Map<String, Object?>>(
-      context: context,
-      builder: (context) => const CropTypeDialog(),
-    );
-    if (details == null) return;
-    setState(() {
-      addingCrop = true;
-      cropMessage = null;
-    });
-    try {
-      final created = await widget.api.createCrop(
-        name: details['name']! as String,
-        averageYieldKgHa: details['average_yield_kg_ha']! as double,
-        maturityDays: details['maturity_days']! as int,
-        perCapitaKgYear: details['per_capita_kg_year']! as double,
-      );
-      final db = await widget.database;
-      await db.insert('crop_catalog', created,
-          conflictAlgorithm: ConflictAlgorithm.replace);
-      if (mounted) {
-        setState(() {
-          cropCatalog = [...cropCatalog, created]..sort((left, right) =>
-              (left['name']! as String).compareTo(right['name']! as String));
-          crop = created['name']! as String;
-        });
-      }
-    } catch (error) {
-      if (mounted) {
-        setState(() =>
-            cropMessage = error.toString().replaceFirst('Exception: ', ''));
-      }
-    } finally {
-      if (mounted) setState(() => addingCrop = false);
     }
   }
 
@@ -1273,28 +1591,31 @@ class _ReportFormState extends State<ReportForm> {
         body: Form(
             key: formKey,
             child: ListView(
-              padding: const EdgeInsets.fromLTRB(18, 8, 18, 30),
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
               children: [
                 const Text('Farm visit details',
-                    style:
-                        TextStyle(fontSize: 21, fontWeight: FontWeight.w800)),
+                    style: TextStyle(
+                        color: inkColor,
+                        fontSize: 24,
+                        height: 1.2,
+                        fontWeight: FontWeight.w800)),
                 const SizedBox(height: 5),
                 const Text('Fields marked with * are required.',
-                    style: TextStyle(color: Color(0xFF748177), fontSize: 12)),
+                    style: TextStyle(color: mutedColor, fontSize: 13)),
                 const SizedBox(height: 19),
-                DropdownButtonFormField<String>(
-                  initialValue: barangay,
-                  decoration: const InputDecoration(labelText: 'Barangay *'),
-                  items: barangays
-                      .map((name) =>
-                          DropdownMenuItem(value: name, child: Text(name)))
-                      .toList(),
-                  onChanged: (value) => setState(() => barangay = value!),
+                _PickerField(
+                  label: 'Barangay *',
+                  value: barangay,
+                  icon: Icons.location_city_outlined,
+                  options: barangays,
+                  searchHint: 'Search barangays',
+                  onSelected: (value) => setState(() => barangay = value),
                 ),
                 const SizedBox(height: 13),
                 TextFormField(
                     controller: farmer,
                     textCapitalization: TextCapitalization.words,
+                    textInputAction: TextInputAction.next,
                     decoration: const InputDecoration(
                         labelText: 'Farmer name *',
                         prefixIcon: Icon(Icons.person_outline)),
@@ -1302,53 +1623,88 @@ class _ReportFormState extends State<ReportForm> {
                         ? 'Enter the farmer name'
                         : null),
                 const SizedBox(height: 13),
-                Row(
-                  children: [
-                    Expanded(
-                      child: DropdownButtonFormField<String>(
-                        key: ValueKey(crop),
-                        initialValue: crop,
-                        decoration:
-                            const InputDecoration(labelText: 'Crop type *'),
-                        items: cropCatalog
-                            .map((item) => DropdownMenuItem(
-                                  value: item['name']! as String,
-                                  child: Text(item['name']! as String),
-                                ))
-                            .toList(),
-                        onChanged: (value) =>
-                            setState(() => crop = value ?? crop),
+                _PickerField(
+                  key: ValueKey(crop),
+                  label: 'Crop type *',
+                  value: crop,
+                  icon: Icons.grass_outlined,
+                  enabled: !loadingCrops,
+                  options: cropCatalog
+                      .map((item) => readString(item['name']) ?? '')
+                      .where((name) => name.isNotEmpty)
+                      .toList(),
+                  searchHint: 'Search crop types',
+                  optionSubtitle: (name) {
+                    final item = cropCatalog.firstWhere(
+                      (item) => readString(item['name']) == name,
+                    );
+                    final maturity = readInt(item['maturity_days']);
+                    final yield = readNum(item['average_yield_kg_ha']);
+                    return [
+                      if (maturity != null) '$maturity days',
+                      if (yield != null)
+                        '${NumberFormat('#,##0').format(yield)} kg/ha',
+                    ].join(' · ');
+                  },
+                  onSelected: (value) => setState(() => crop = value),
+                ),
+                if (loadingCrops)
+                  Semantics(
+                    liveRegion: true,
+                    label: 'Loading crop types',
+                    child: const LinearProgressIndicator(minHeight: 3),
+                  ),
+                if (cropMessage != null)
+                  Semantics(
+                    liveRegion: true,
+                    child: Container(
+                      margin: const EdgeInsets.only(top: 8),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: cropMessageIsWarning
+                            ? warningSurfaceColor
+                            : errorSurfaceColor,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: cropMessageIsWarning
+                              ? const Color(0xFFE9D9B6)
+                              : const Color(0xFFF1D8D5),
+                        ),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            cropMessageIsWarning
+                                ? Icons.cloud_off_outlined
+                                : Icons.error_outline,
+                            color: cropMessageIsWarning
+                                ? warningColor
+                                : errorColor,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              cropMessage!,
+                              style: TextStyle(
+                                color: cropMessageIsWarning
+                                    ? warningColor
+                                    : errorColor,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    IconButton.filledTonal(
-                      onPressed: addingCrop ? null : addCrop,
-                      tooltip: 'Add crop type',
-                      icon: addingCrop
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2))
-                          : const Icon(Icons.add),
-                    ),
-                  ],
-                ),
-                if (loadingCrops) const LinearProgressIndicator(minHeight: 2),
-                if (cropMessage != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 6),
-                    child: Text(cropMessage!,
-                        style: TextStyle(
-                            color: cropMessage!.startsWith('Offline:')
-                                ? Colors.orange.shade800
-                                : Colors.red.shade700,
-                            fontSize: 11)),
                   ),
                 const SizedBox(height: 13),
                 TextFormField(
                   controller: area,
                   keyboardType:
                       const TextInputType.numberWithOptions(decimal: true),
+                  textInputAction: TextInputAction.done,
                   decoration: const InputDecoration(
                       labelText: 'Planted area (hectares) *', suffixText: 'ha'),
                   onChanged: (_) => setState(() {}),
@@ -1360,44 +1716,91 @@ class _ReportFormState extends State<ReportForm> {
                   },
                 ),
                 const SizedBox(height: 13),
-                OutlinedButton.icon(
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
                     onPressed: chooseDate,
                     icon: const Icon(Icons.calendar_today_outlined),
                     label: Text(
-                        'Planting date · ${DateFormat('MMM d, yyyy').format(plantingDate)}')),
+                      'Planting date · ${DateFormat('MMM d, yyyy').format(plantingDate)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
                 const SizedBox(height: 13),
-                DropdownButtonFormField<String>(
-                  initialValue: method,
-                  decoration:
-                      const InputDecoration(labelText: 'Planting method *'),
-                  items: const ['Direct Seeding', 'Transplanting']
-                      .map((name) =>
-                          DropdownMenuItem(value: name, child: Text(name)))
-                      .toList(),
-                  onChanged: (value) => setState(() => method = value!),
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    'Planting method *',
+                    style: TextStyle(
+                      color: inkColor,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _PlantingMethodOption(
+                        title: 'Direct Seeding',
+                        subtitle: 'Seed in the field',
+                        icon: Icons.grain,
+                        selected: method == 'Direct Seeding',
+                        onTap: () => setState(() => method = 'Direct Seeding'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: _PlantingMethodOption(
+                        title: 'Transplanting',
+                        subtitle: 'Move young seedlings',
+                        icon: Icons.energy_savings_leaf_outlined,
+                        selected: method == 'Transplanting',
+                        onTap: () => setState(() => method = 'Transplanting'),
+                      ),
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 14),
-                OutlinedButton.icon(
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
                     onPressed: locating ? null : captureLocation,
                     icon: Icon(position == null
                         ? Icons.my_location
                         : Icons.location_on_outlined),
-                    label: Text(locating
-                        ? 'Getting GPS location…'
-                        : position == null
-                            ? 'Capture farm GPS location'
-                            : 'GPS captured · ${position!.latitude.toStringAsFixed(5)}, ${position!.longitude.toStringAsFixed(5)}')),
+                    label: Flexible(
+                      child: Text(
+                        locating
+                            ? 'Getting GPS location…'
+                            : position == null
+                                ? 'Capture farm GPS location'
+                                : 'GPS captured · ${position!.latitude.toStringAsFixed(5)}, ${position!.longitude.toStringAsFixed(5)}',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ),
+                ),
                 if (locationError != null)
-                  Padding(
+                  Semantics(
+                    liveRegion: true,
+                    child: Padding(
                       padding: const EdgeInsets.only(top: 6),
                       child: Text(locationError!,
-                          style: TextStyle(
-                              color: Colors.orange.shade800, fontSize: 11))),
+                          style: const TextStyle(
+                              color: warningColor, fontSize: 13)),
+                    ),
+                  ),
                 const SizedBox(height: 16),
                 Container(
                   decoration: BoxDecoration(
-                      color: const Color(0xFFEAF4E9),
-                      borderRadius: BorderRadius.circular(13)),
+                    color: softGreenColor,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: outlineColor),
+                  ),
                   padding: const EdgeInsets.all(15),
                   child: Column(children: [
                     _CalculationLine(
@@ -1430,6 +1833,357 @@ class _ReportFormState extends State<ReportForm> {
       );
 }
 
+class _PickerField extends StatelessWidget {
+  final String label;
+  final String value;
+  final IconData icon;
+  final List<String> options;
+  final String searchHint;
+  final bool enabled;
+  final String? Function(String value)? optionSubtitle;
+  final ValueChanged<String> onSelected;
+
+  const _PickerField({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.icon,
+    required this.options,
+    required this.searchHint,
+    this.enabled = true,
+    required this.onSelected,
+    this.optionSubtitle,
+  });
+
+  Future<void> _openPicker(BuildContext context) async {
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => _PickerSheet(
+        label: label,
+        value: value,
+        options: options,
+        searchHint: searchHint,
+        optionSubtitle: optionSubtitle,
+      ),
+    );
+    if (selected != null && context.mounted) onSelected(selected);
+  }
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: surfaceColor,
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: enabled ? () => _openPicker(context) : null,
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 72),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: outlineColor),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: softGreenColor,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(icon, color: green, size: 21),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        label,
+                        style: const TextStyle(
+                          color: mutedColor,
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        value,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: inkColor,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Icon(Icons.expand_more, color: mutedColor),
+              ],
+            ),
+          ),
+        ),
+      );
+}
+
+class _PickerSheet extends StatefulWidget {
+  final String label;
+  final String value;
+  final List<String> options;
+  final String searchHint;
+  final String? Function(String value)? optionSubtitle;
+
+  const _PickerSheet({
+    required this.label,
+    required this.value,
+    required this.options,
+    required this.searchHint,
+    this.optionSubtitle,
+  });
+
+  @override
+  State<_PickerSheet> createState() => _PickerSheetState();
+}
+
+class _PickerSheetState extends State<_PickerSheet> {
+  final search = TextEditingController();
+
+  @override
+  void dispose() {
+    search.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filtered = widget.options
+        .where((option) =>
+            option.toLowerCase().contains(search.text.trim().toLowerCase()))
+        .toList();
+
+    return FractionallySizedBox(
+      heightFactor: 0.86,
+      child: Container(
+        decoration: const BoxDecoration(
+          color: canvasColor,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: SafeArea(
+          top: false,
+          child: Column(
+            children: [
+              const SizedBox(height: 10),
+              Container(
+                width: 38,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFD8E1D8),
+                  borderRadius: BorderRadius.circular(5),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 17, 12, 14),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Choose ${widget.label.replaceAll(' *', '').toLowerCase()}',
+                            style: const TextStyle(
+                              color: inkColor,
+                              fontSize: 20,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            '${widget.options.length} options available',
+                            style: const TextStyle(
+                              color: mutedColor,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Close',
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: TextField(
+                  controller: search,
+                  onChanged: (_) => setState(() {}),
+                  textInputAction: TextInputAction.search,
+                  decoration: InputDecoration(
+                    hintText: widget.searchHint,
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: search.text.isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: 'Clear search',
+                            onPressed: () {
+                              search.clear();
+                              setState(() {});
+                            },
+                            icon: const Icon(Icons.close),
+                          ),
+                    filled: true,
+                    fillColor: surfaceColor,
+                  ),
+                ),
+              ),
+              Expanded(
+                child: filtered.isEmpty
+                    ? const Center(
+                        child: Text(
+                          'No matching options',
+                          style: TextStyle(color: mutedColor, fontSize: 14),
+                        ),
+                      )
+                    : ListView.separated(
+                        padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
+                        itemCount: filtered.length,
+                        separatorBuilder: (_, __) => const SizedBox(height: 4),
+                        itemBuilder: (context, index) {
+                          final option = filtered[index];
+                          final selected = option == widget.value;
+                          final subtitle = widget.optionSubtitle?.call(option);
+                          return Material(
+                            color: selected ? softGreenColor : surfaceColor,
+                            borderRadius: BorderRadius.circular(14),
+                            child: ListTile(
+                              minVerticalPadding: 12,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                                side: BorderSide(
+                                  color: selected
+                                      ? const Color(0xFFB7D5B8)
+                                      : outlineColor,
+                                ),
+                              ),
+                              title: Text(
+                                option,
+                                style: TextStyle(
+                                  fontWeight: selected
+                                      ? FontWeight.w700
+                                      : FontWeight.w500,
+                                  fontSize: 16,
+                                  color: inkColor,
+                                ),
+                              ),
+                              subtitleTextStyle: const TextStyle(
+                                color: mutedColor,
+                                fontSize: 13,
+                              ),
+                              subtitle: subtitle == null || subtitle.isEmpty
+                                  ? null
+                                  : Text(subtitle),
+                              trailing: selected
+                                  ? const Icon(Icons.check_circle, color: green)
+                                  : null,
+                              onTap: () => Navigator.pop(context, option),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PlantingMethodOption extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _PlantingMethodOption({
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: selected ? softGreenColor : surfaceColor,
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: onTap,
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 112),
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: selected ? const Color(0xFF91BD94) : outlineColor,
+                width: selected ? 1.5 : 1,
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(icon, color: green, size: 20),
+                    const Spacer(),
+                    Icon(
+                      selected
+                          ? Icons.radio_button_checked
+                          : Icons.radio_button_off,
+                      color: selected ? green : const Color(0xFFB0BBB1),
+                      size: 19,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: inkColor,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  subtitle,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: mutedColor,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+}
+
 class _BrandMark extends StatelessWidget {
   const _BrandMark();
   @override
@@ -1450,22 +2204,48 @@ class _SummaryCard extends StatelessWidget {
       {required this.label, required this.value, required this.icon});
   @override
   Widget build(BuildContext context) => Container(
+        constraints: const BoxConstraints(minHeight: 82),
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(13),
-            border: Border.all(color: const Color(0xFFE9EDE7))),
+          color: surfaceColor,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: outlineColor),
+        ),
         child: Row(children: [
-          Icon(icon, color: green),
-          const SizedBox(width: 10),
-          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(label,
-                style: const TextStyle(
-                    fontSize: 9, color: Color(0xFF829087), letterSpacing: .5)),
-            Text(value,
-                style:
-                    const TextStyle(fontSize: 21, fontWeight: FontWeight.w800)),
-          ]),
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: softGreenColor,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(icon, color: green, size: 21),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: mutedColor,
+                      fontWeight: FontWeight.w600,
+                    )),
+                const SizedBox(height: 2),
+                Text(value,
+                    style: const TextStyle(
+                      color: inkColor,
+                      fontSize: 24,
+                      height: 1.1,
+                      fontWeight: FontWeight.w800,
+                    )),
+              ],
+            ),
+          ),
         ]),
       );
 }
@@ -1476,33 +2256,54 @@ class _ReportTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final synced = report['sync_state'] == 'synced';
-    final cropName = report['crop_name'] as String;
-    final maturityDays = (report['maturity_days'] as num?)?.toInt() ??
+    final isDraft = report['status'] == 'draft';
+    final cropName = readString(report['crop_name']) ?? '';
+    final maturityDays = readInt(report['maturity_days']) ??
         crops[cropName]?['maturity']?.toInt() ??
         0;
-    final harvest = DateTime.parse(report['planting_date'] as String)
-        .add(Duration(days: maturityDays));
+    final plantingDate = readString(report['planting_date']);
+    final harvest = (plantingDate == null || plantingDate.isEmpty)
+        ? DateTime.now()
+        : DateTime.parse(plantingDate).add(Duration(days: maturityDays));
     return Card(
-      color: Colors.white,
+      color: surfaceColor,
       elevation: 0,
-      margin: const EdgeInsets.only(bottom: 9),
+      margin: const EdgeInsets.only(bottom: 10),
       shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(13),
-          side: const BorderSide(color: Color(0xFFE9EDE7))),
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: outlineColor)),
       child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         leading: CircleAvatar(
-            backgroundColor: const Color(0xFFEAF4E9),
+            backgroundColor: softGreenColor,
             child: const Icon(Icons.grass, color: green)),
         title: Text('${report['crop_name']} · ${report['barangay_name']}',
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+            style: const TextStyle(
+                color: inkColor, fontSize: 15, fontWeight: FontWeight.w700)),
         subtitle: Text(
-            '${report['farmer_name']} · Harvest ${DateFormat('MMM d').format(harvest)}\n${report['area_ha']} ha · ${report['status']}',
-            style: const TextStyle(height: 1.6, fontSize: 11)),
-        trailing: Icon(
-            synced ? Icons.cloud_done_outlined : Icons.cloud_upload_outlined,
-            size: 19,
-            color: synced ? green : Colors.orange.shade700),
+          '${report['farmer_name']} · Harvest ${DateFormat('MMM d').format(harvest)}\n${report['area_ha']} ha · ${report['status']}\n${isDraft ? 'Saved on this device' : synced ? 'Synced' : 'Waiting to sync'}',
+          style: const TextStyle(height: 1.5, fontSize: 12, color: mutedColor),
+        ),
+        trailing: Tooltip(
+          message: isDraft
+              ? 'Draft saved on this device'
+              : synced
+                  ? 'Report synced'
+                  : 'Report waiting to sync',
+          child: Icon(
+            isDraft
+                ? Icons.edit_note_outlined
+                : synced
+                    ? Icons.cloud_done_outlined
+                    : Icons.cloud_upload_outlined,
+            size: 22,
+            color: isDraft
+                ? mutedColor
+                : synced
+                    ? green
+                    : warningColor,
+          ),
+        ),
         isThreeLine: true,
       ),
     );
@@ -1520,17 +2321,17 @@ class _CalculationLine extends StatelessWidget {
       Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
         Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(label,
-              style: const TextStyle(fontSize: 11, color: Color(0xFF6D7B70))),
+              style: const TextStyle(
+                  color: inkColor, fontSize: 13, fontWeight: FontWeight.w600)),
           const SizedBox(height: 4),
-          Text(hint,
-              style: const TextStyle(fontSize: 10, color: Color(0xFF849087))),
+          Text(hint, style: const TextStyle(fontSize: 12, color: mutedColor)),
         ]),
         const SizedBox(width: 8),
         Flexible(
             child: Text(value,
                 textAlign: TextAlign.end,
                 style: const TextStyle(
-                    fontWeight: FontWeight.w800, color: green))),
+                    color: green, fontSize: 15, fontWeight: FontWeight.w800))),
       ]);
 }
 
@@ -1540,13 +2341,14 @@ class _EmptyReports extends StatelessWidget {
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.symmetric(vertical: 40),
         child: Column(children: const [
-          Icon(Icons.agriculture_outlined, size: 38, color: Color(0xFF9AAF9C)),
+          Icon(Icons.agriculture_outlined, size: 38, color: mutedColor),
           SizedBox(height: 10),
           Text('No farm reports yet',
-              style: TextStyle(fontWeight: FontWeight.w700)),
+              style: TextStyle(
+                  color: inkColor, fontSize: 16, fontWeight: FontWeight.w700)),
           SizedBox(height: 4),
           Text('Tap “New farm report” to record a visit.',
-              style: TextStyle(fontSize: 12, color: Color(0xFF829087))),
+              style: TextStyle(fontSize: 14, color: mutedColor)),
         ]),
       );
 }

@@ -9,7 +9,7 @@ flutter pub get
 flutter run -d chrome --web-port 5174
 ```
 
-On Flutter web the default API URL is derived from the browser host at port 4000, so Chrome on `localhost:5174` connects to `localhost:4000`. Native debug builds default to this workspace's local API at `http://10.0.10.85:4000/api`, reachable by devices on the same Wi-Fi. Start the API with `cd backend; npm start`. If the computer's LAN IP changes, override the local default with `--dart-define=LOCAL_API_BASE_URL=http://<computer-LAN-IP>:4000/api`. The API must be running and inbound TCP port 4000 allowed through the computer firewall.
+On Flutter web the default API URL is derived from the browser host at port 4000, so Chrome on `localhost:5174` connects to `localhost:4000`. Native debug builds default to this workspace's local API at `http://192.168.2.9:4000/api`, reachable by devices on the same Wi-Fi. Start the API with `cd backend; npm start`. If the computer's LAN IP changes, override the local default with `--dart-define=LOCAL_API_BASE_URL=http://<computer-LAN-IP>:4000/api`. The API must be running and inbound TCP port 4000 allowed through the computer firewall.
 
 The field app is intended to run in Chrome for this workflow. Start the API and React dashboard, then run:
 

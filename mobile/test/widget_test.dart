@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'package:agriflow_field/main.dart';
 
@@ -17,6 +18,69 @@ void main() {
     expect(crops['Rice']!['yield'], 4500);
     expect(crops['Corn']!['maturity'], 110);
     expect(crops['Mongo']!['maturity'], 90);
+  });
+
+  test('nullable numeric fields are safe to convert from API data', () {
+    final crop = <String, Object?>{
+      'name': 'Rice',
+      'average_yield_kg_ha': null,
+      'maturity_days': null,
+    };
+    expect(readNum(crop['average_yield_kg_ha']), isNull);
+    expect(readInt(crop['maturity_days']), isNull);
+    expect(readString(null), isNull);
+    expect(readNum('4500'), 4500);
+    expect(readInt('120'), 120);
+  });
+
+  test('upgrades a local crop catalog that predates maturity_days', () async {
+    sqfliteFfiInit();
+    final database = await databaseFactoryFfi.openDatabase(
+      inMemoryDatabasePath,
+      options: OpenDatabaseOptions(
+        version: 3,
+        onCreate: (db, _) async {
+          await db.execute('''
+            CREATE TABLE crop_catalog (
+              name TEXT PRIMARY KEY,
+              average_yield_kg_ha REAL NOT NULL,
+              per_capita_kg_year REAL NOT NULL DEFAULT 0
+            )
+          ''');
+          await db.insert('crop_catalog', {
+            'name': 'Rice',
+            'average_yield_kg_ha': 4500,
+            'per_capita_kg_year': 115,
+          });
+        },
+      ),
+    );
+    addTearDown(database.close);
+
+    await upgradeLocalDatabase(database, 3);
+
+    final columns = await database.rawQuery('PRAGMA table_info(crop_catalog)');
+    expect(columns.any((column) => column['name'] == 'maturity_days'), isTrue);
+    final rice = await database.query(
+      'crop_catalog',
+      where: 'name = ?',
+      whereArgs: ['Rice'],
+    );
+    expect(rice.single['maturity_days'], 120);
+    await database.insert('crop_catalog', {
+      'name': 'Cucumber',
+      'average_yield_kg_ha': 18000,
+      'per_capita_kg_year': 1,
+      'maturity_days': 60,
+    });
+    expect(
+      await database.query(
+        'crop_catalog',
+        where: 'name = ?',
+        whereArgs: ['Cucumber'],
+      ),
+      hasLength(1),
+    );
   });
 
   test('release mobile builds require an internally configured API URL', () {
@@ -127,7 +191,7 @@ void main() {
         isWeb: false,
         currentUri: Uri.parse('file:///app'),
       ),
-      'http://10.0.10.85:4000/api',
+      'http://192.168.2.9:4000/api',
     );
     expect(
       resolveApiBaseUrl(

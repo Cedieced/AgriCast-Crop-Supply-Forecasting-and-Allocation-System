@@ -73,6 +73,27 @@ async function runSqlFile(path) {
 
 export async function initializeDatabase() {
   await runSqlFile("../sql/schema.sql");
+  const { rows } = await pool.query(
+    `SELECT COLUMN_NAME, IS_NULLABLE
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'crop_maturity_periods'`,
+  );
+  const columns = new Map(rows.map((row) => [row.COLUMN_NAME, row.IS_NULLABLE]));
+  for (const column of ["direct_seeding_days", "transplanting_days"]) {
+    if (!columns.has(column)) {
+      await pool.query(`ALTER TABLE crop_maturity_periods ADD COLUMN ${column} INT NULL`);
+      columns.set(column, "YES");
+    }
+    if (columns.get(column) === "YES") {
+      await pool.query(
+        `UPDATE crop_maturity_periods SET ${column} = maturity_days WHERE ${column} IS NULL`,
+      );
+      await pool.query(
+        `ALTER TABLE crop_maturity_periods MODIFY COLUMN ${column} INT NOT NULL`,
+      );
+    }
+  }
   await runSqlFile("../sql/triggers.sql");
 }
 

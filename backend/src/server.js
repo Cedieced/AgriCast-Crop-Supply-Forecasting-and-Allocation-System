@@ -194,8 +194,10 @@ app.post("/api/crops", requireAuth, async (req, res, next) => {
       [crop.name, crop.averageYieldKgHa, crop.perCapitaKgYear],
     );
     await client.query(
-      "INSERT INTO crop_maturity_periods (crop_type_id, maturity_days) VALUES (?,?)",
-      [created.insertId, crop.maturityDays],
+      `INSERT INTO crop_maturity_periods
+         (crop_type_id, direct_seeding_days, transplanting_days, maturity_days)
+       VALUES (?,?,?,?)`,
+      [created.insertId, crop.maturityDays, crop.maturityDays, crop.maturityDays],
     );
     await client.query("COMMIT");
     res.status(201).json({
@@ -244,8 +246,10 @@ app.put("/api/crops/:id", requireAuth, async (req, res, next) => {
       [crop.name, crop.averageYieldKgHa, crop.perCapitaKgYear, cropId],
     );
     await client.query(
-      "UPDATE crop_maturity_periods SET maturity_days = ? WHERE crop_type_id = ?",
-      [crop.maturityDays, cropId],
+      `UPDATE crop_maturity_periods
+       SET direct_seeding_days = ?, transplanting_days = ?, maturity_days = ?
+       WHERE crop_type_id = ?`,
+      [crop.maturityDays, crop.maturityDays, crop.maturityDays, cropId],
     );
     await client.query("COMMIT");
     res.json({
