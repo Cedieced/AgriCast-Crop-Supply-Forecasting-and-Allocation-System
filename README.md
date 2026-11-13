@@ -1,45 +1,146 @@
-# AgriCast — Crop Supply Forecasting and Allocation System
+# AgriCast: Crop Supply Forecasting and Allocation System for Boac, Marinduque
 
-An MVP for the Municipal Agriculture Office of Boac, Marinduque. The workspace contains a React dashboard, an Express/MySQL API, and a Flutter field-app foundation designed for offline data capture.
+## Selected Sector
 
-## Project layout
+**Agriculture — Agricultural Information Systems and Digital Agriculture**
 
-- `frontend/` — React, Vite, Tailwind CSS, Leaflet dashboard.
-- `backend/` — Express REST API, JWT authentication, MySQL schema and seed data.
-- `mobile/` — Flutter field application with SQLite draft storage and background connectivity sync.
-- `docs/system-design.md` — Architecture, ERD, use cases, data flow, and wireframes.
+AgriCast is an MVP designed for the Office of the Municipal Agriculturist (OMA) of Boac, Marinduque, with a system structure intended to support future extension to other municipalities.
 
-This repository does not contain a PHP API or use XAMPP/Apache to serve the backend. The API is Express/Node.js at `http://localhost:4000/api`; use its `/api/health` endpoint to check both API and MySQL connectivity. The Flutter and React clients connect to this API, and MySQL is accessed only by the backend.
+## Brief Problem Description
 
-## Run locally
+The project addresses challenges described in the project study around collecting and maintaining current crop information, consolidating barangay-level field records, estimating harvest volumes and dates, comparing projected supply with demand, and identifying potential destinations for surplus produce. Existing workflows may rely on field visits, interviews, paper records, and spreadsheets, making it difficult to keep information organized and readily available for planning.
 
-Requirements: Node.js 20+, npm, MySQL 8+ (or Docker Desktop), MySQL Workbench, and Flutter 3.19+ for the mobile app.
+## Proposed Solution
 
-1. Start MySQL Server 8+ and connect to it in MySQL Workbench. Workbench is the database client; it must connect to a running MySQL Server.
-2. In Workbench, create the database with `CREATE DATABASE crop_supply CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;`, select it as the default schema, then open and execute [`backend/sql/schema.sql`](./backend/sql/schema.sql). Create a MySQL user with privileges on this database, or use an existing development account. For example, from an administrator connection, create a local `cropapp` user and grant it access with `CREATE USER 'cropapp'@'localhost' IDENTIFIED BY 'choose-a-password';` and `GRANT ALL PRIVILEGES ON crop_supply.* TO 'cropapp'@'localhost';`.
-3. Create or update `.env` using `.env.example` as a reference. Set `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DATABASE` to match that MySQL user (remove the old `DATABASE_URL` setting), and change `JWT_SECRET` before using non-demo data. The included defaults match the local Docker setup.
-4. Alternatively, start a local MySQL server with Docker: `docker compose up -d db`. Connect to `localhost:3306` in Workbench using user `cropapp` and password `cropapp`.
-5. Start the API: `cd backend; npm install; npm run dev`
-6. Start the web dashboard: `cd frontend; npm install; npm run dev`
-7. Start the field app in Chrome: `cd mobile; flutter pub get; flutter run -d chrome --web-port 5174`.
-8. Open `http://localhost:5173` for the dashboard and `http://localhost:5174` for the field app. On the same computer, both use the API at `http://localhost:4000/api`. The seeded web demo account is `admin@boac.gov.ph` / `BoacDemo123!`.
+AgriCast connects a Flutter field-reporting app, a React web dashboard, an Express API, and a MySQL database. Field personnel can enter planting information, save drafts when offline, and synchronize queued reports when connectivity returns. Authorized municipal and provincial users can review reports and use the shared dashboard to inspect crop forecasts, barangay map information, supply comparisons, notifications, and allocation recommendations.
 
-In VS Code, run the `Start AgriCast Services` task to start the API and both browser apps together. For dashboard access from another device on the same Wi-Fi, open it using the computer's LAN IP and allow inbound TCP port 5173 through Windows Firewall on a trusted private network. The dashboard uses Vite's same-origin `/api` proxy to reach the API on the host computer, so the remote browser must not use `localhost` as the API address. The Flutter field app connects directly to the API; configure its `API_BASE_URL` with the host's LAN IP, allow inbound TCP ports 4000 and 5174, and include the field-app browser origin in `.env`'s `WEB_ORIGIN`. Restart the API after changing `.env`. Do not expose MySQL port 3306 to the device or the public network.
+The system provides decision support; its demo yield, population, and consumption assumptions are illustrative and must be validated before operational use.
 
-The API initializes the schema, audit triggers, and sample data on startup. It listens on port 4000 by default. In Workbench, refresh the `crop_supply` schema after the API starts to see its tables and data.
+## Core Functional Features
 
-The MySQL database is a new database; existing PostgreSQL data is not copied automatically. Back up and migrate any existing records separately before switching production systems.
+- Secure sign-in and role-based permissions for administrators, municipal officers, provincial officers, and field officers.
+- Mobile field reporting with barangay, farmer, crop, area, planting date, planting method, and GPS capture.
+- Local draft storage and retryable synchronization for field reports.
+- Report review, approval or rejection, and remarks.
+- Rule-based expected harvest, estimated harvest date, weekly demand, and supply-status calculations.
+- Barangay map and forecast views, with a GeoJSON boundary layer for Boac's 61 barangays.
+- Supply-allocation recommendations constrained by estimated surplus and receiving-municipality demand.
+- In-app notifications and PDF/Excel exports.
+- API audit records and authenticated server-sent events for dashboard data updates.
 
-## MVP boundaries
+## Technologies Used
 
-- Seeded production values are illustrative; confirm them with the Municipal Agriculture Office before operational use. Barangay map coordinates are intentionally unset.
-- The dashboard map validates stored barangay coordinates against the 61 polygons in `frontend/public/data/boac-barangay-boundaries.geojson`. If coordinates are missing or outside a polygon, it uses an interior representative point; this is a barangay-level visualization point, not a farm GPS location. The boundary layer is derived from NAMRIA administrative boundaries (valid on 2023-11-06), cross-referenced to PSA PSGC 2023-10-24 in the [Barangay Boundaries Repository](https://github.com/bendlikeabamboo/barangay-boundaries-repository), release [v2026.4.13.0](https://github.com/bendlikeabamboo/barangay-boundaries-repository/releases/tag/v2026.4.13.0). The downloaded release archive was SHA-256 verified before extracting Boac (ADM3 code `PH1704001`); the GeoJSON retains PSGC identifiers and source properties. The release simplifies polygon boundaries at 0.005°; confirm against current LGU/NAMRIA GIS before legal, cadastral, or operational decisions. Data attribution: © NAMRIA; PSGC attributes © Philippine Statistics Authority.
-- Forecast demand uses weekly population consumption (population × per-capita kg/year ÷ 52). Crop-specific consumption defaults are demo values and should be validated by municipal/provincial officers.
-- PDF and Excel exports are available from the Reports page. Approval, remarks, report entry, and recommendations are exposed through the API and dashboard.
-- The Flutter project implements local draft persistence, GPS capture, and retryable sync. Configure `API_BASE_URL` for the target deployment before field testing.
+| Area | Technologies |
+|---|---|
+| Web frontend | React, JSX/HTML, JavaScript, Vite, Tailwind CSS |
+| Mapping | Leaflet, GeoJSON |
+| Backend/API | Node.js, Express |
+| Database | MySQL 8+, MySQL2 |
+| Field application | Flutter, Dart, SQLite |
+| Authentication | JSON Web Tokens (JWT) |
+| Testing | Node.js test runner, Flutter test |
 
-## Security and deployment
+## Installation and Running Instructions
 
-Configure strong secrets, HTTPS, managed MySQL backups, restricted CORS origins, and a production identity/password policy before deployment. Development demo accounts and sample data are not created in production. See the [Vercel deployment guide](./docs/vercel-deployment.md) for production setup and verification, and `docs/system-design.md` for module boundaries and the data model.
-"# AgriCast-Crop-Supply-Forecasting-and-Allocation-System-for-Boac-Marinduque" 
-"# AgriCast-Crop-Supply-Forecasting-and-Allocation-System-for-Boac-Marinduque" 
+### Requirements
+
+- Node.js 20+ and npm.
+- MySQL 8+ or Docker Desktop.
+- Flutter 3.19+ to run the field app.
+- A modern browser.
+- MySQL Workbench is optional; it is a database client and requires a running MySQL Server.
+
+### 1. Start the database
+
+From the repository root, start the included local MySQL service with Docker:
+
+```powershell
+docker compose up -d db
+```
+
+The local Docker defaults expose MySQL on `localhost:3306` with database `crop_supply`, user `cropapp`, and password `cropapp`. These credentials are for development only.
+
+Alternatively, run MySQL Server 8+ yourself, create the `crop_supply` database, and configure a database user with access to it. The API initializes the schema, audit triggers, and development sample data on startup. See [`backend/sql/`](./backend/sql/) for the schema and seed files.
+
+### 2. Configure and start the API
+
+Create or update a repository-root `.env` using [`.env.example`](./.env.example). Set `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DATABASE` for your MySQL instance. Replace the example `JWT_SECRET` before using non-demo data.
+
+```powershell
+cd backend
+npm install
+npm run dev
+```
+
+The API listens on `http://localhost:4000` by default. Check `http://localhost:4000/api/health` for API and database connectivity.
+
+### 3. Start the web dashboard
+
+In another terminal:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. Vite proxies `/api` requests to the local API at `http://127.0.0.1:4000`.
+
+### 4. Start the Flutter field app
+
+In another terminal:
+
+```powershell
+cd mobile
+flutter pub get
+flutter run -d chrome --web-port 5174
+```
+
+Open `http://localhost:5174`. In this local browser workflow, the field app connects to the API on port `4000`. For LAN access or production builds, configure the API URL and allowed browser origins as described in [`mobile/README.md`](./mobile/README.md) and the [deployment guide](./docs/vercel-deployment.md).
+
+The seeded web demo account is `admin@boac.gov.ph` / `BoacDemo123!`. Use demo credentials only for local development. Do not expose MySQL port 3306 to other devices or the public internet.
+
+### Tests
+
+Run each command from its component directory:
+
+```powershell
+# backend
+npm test
+
+# frontend
+node --test
+npm run build
+
+# mobile
+flutter test
+```
+
+## Group Members
+
+- Sheila Mae M. Romasanta
+- Aron M. Zulueta
+- John Lloyd Q. Laylay
+- John Cedrick R. Malco
+- Benedict O. Medallon
+- Ken Gabriel LB. Montellano
+
+**Program:** BS Information Technology - 3C  
+**Institution:** Marinduque State University
+
+## Full Project Documentation
+
+See [PROJECT_DOCUMENTATION.md](./PROJECT_DOCUMENTATION.md) for the full project manuscript, including its abstract, introduction, methodology, results and discussion, conclusion, references, and CRediT statement. Additional implementation details are available in the [system design](./docs/system-design.md), [deployment guide](./docs/vercel-deployment.md), and [mobile app README](./mobile/README.md).
+
+## AI Disclosure Reference
+
+AI-assisted work and its supporting evidence are documented in [AI_Disclosure.md](./AI_Disclosure.md). Consult that disclosure alongside the source code and project documentation.
+
+## Project Boundaries and Deployment
+
+- Seeded crop yields, populations, and consumption values are illustrative; confirm them with the Municipal Agriculture Office before operational use.
+- Stored barangay coordinates may be unset. The dashboard checks coordinates against the barangay polygon and may use an interior representative point for visualization; this is not a farm GPS location.
+- The 61-feature barangay boundary layer is simplified at 0.005 degrees. Confirm boundaries with current LGU/NAMRIA GIS before legal, cadastral, or operational decisions. Data attribution: NAMRIA administrative boundaries; Philippine Statistics Authority PSGC attributes.
+- Forecasting uses configured yield, maturity, population, and per-capita consumption assumptions. Weather-provider forecasts and dedicated pest/disease reporting are not included in the current data model.
+- The backend is an Express/Node.js API, not a PHP API served by XAMPP/Apache. The API is the only service that connects to MySQL.
+- Before production deployment, configure HTTPS, strong secrets, restricted CORS origins, managed MySQL backups, and appropriate identity/password policies. See the [Vercel deployment guide](./docs/vercel-deployment.md) for the documented deployment pattern and verification checklist.

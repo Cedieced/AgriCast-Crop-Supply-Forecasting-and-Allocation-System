@@ -5,8 +5,12 @@ INSERT IGNORE INTO municipalities (name, population) VALUES
 INSERT IGNORE INTO crop_types (name, average_yield_kg_ha, per_capita_kg_year) VALUES
   ('Rice', 4500, 115), ('Corn', 4200, 18), ('Mongo', 950, 1.2), ('Tomato', 18000, 9);
 
-INSERT IGNORE INTO crop_maturity_periods (crop_type_id, maturity_days)
-SELECT id, CASE name WHEN 'Rice' THEN 120 WHEN 'Corn' THEN 110 WHEN 'Mongo' THEN 90 ELSE 75 END
+INSERT IGNORE INTO crop_maturity_periods
+  (crop_type_id, direct_seeding_days, transplanting_days, maturity_days)
+SELECT id,
+  CASE name WHEN 'Rice' THEN 120 WHEN 'Corn' THEN 110 WHEN 'Mongo' THEN 90 ELSE 75 END,
+  CASE name WHEN 'Rice' THEN 120 WHEN 'Corn' THEN 110 WHEN 'Mongo' THEN 90 ELSE 75 END,
+  CASE name WHEN 'Rice' THEN 120 WHEN 'Corn' THEN 110 WHEN 'Mongo' THEN 90 ELSE 75 END
 FROM crop_types;
 
 INSERT IGNORE INTO barangays (municipality_id, name, latitude, longitude, population)

@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS crop_types (
 CREATE TABLE IF NOT EXISTS crop_maturity_periods (
   id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   crop_type_id INT UNSIGNED NOT NULL UNIQUE,
+  direct_seeding_days INT NOT NULL CHECK (direct_seeding_days > 0),
+  transplanting_days INT NOT NULL CHECK (transplanting_days > 0),
   maturity_days INT NOT NULL CHECK (maturity_days > 0),
   CONSTRAINT maturity_crop_fk FOREIGN KEY (crop_type_id) REFERENCES crop_types(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;

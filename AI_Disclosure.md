@@ -1,10 +1,24 @@
 # Provisional AI Disclosure
 
+This disclosure applies to the AgriCast system implemented in this repository and is intended to be read as part of the project’s operational and technical record, not as a separate or standalone document.
+
+## System connection
+
+The AI-assisted work described in this file is connected to the live AgriCast implementation across the project’s core modules:
+
+- Web dashboard and user interface: `frontend/src/App.jsx`
+- Backend API and business logic: `backend/src/server.js` and related backend files
+- Mobile field application: `mobile/lib/main.dart` and Flutter app files
+- Data and forecast logic: backend domain logic, seed data, and app datasets
+- Documentation and implementation notes: `README.md` and project documentation files
+
+This disclosure therefore references the repository’s actual AgriCast system components and should be interpreted in the context of those files and their runtime behavior.
+
 ## AI-assisted tasks
 
 ### 1. Initial system design and implementation
 
-**Affected sections/files:** Web dashboard, Express API, PostgreSQL schema and seed data, Flutter field application, and system-design documentation. Recorded examples: `frontend/src/App.jsx`, `backend/src/server.js`, `mobile/lib/main.dart`, `mobile/pubspec.yaml`, `mobile/pubspec.lock`, and `README.md`. The retained notes do not identify all generated system-design document filenames.
+**Affected sections/files:** Web dashboard, Express API, PostgreSQL schema and seed data, Flutter field application, and related system-design documentation. Representative examples include `frontend/src/App.jsx`, `backend/src/server.js`, `mobile/lib/main.dart`, `mobile/pubspec.yaml`, `mobile/pubspec.lock`, and `README.md`. The retained notes do not identify every generated system-design document filename.
 
 **Exact user prompt:**
 
@@ -18,7 +32,6 @@
 > SYSTEM ARCHITECTURE
 >
 > Create two integrated modules:
->
 > 1. Field Mobile Application
 > 2. Provincial Central Web Dashboard
 >
@@ -40,7 +53,6 @@
 > - Role: Field Officer
 >
 > B. Farm Data Collection Form
->
 > Fields:
 > - Barangay Selection (Dropdown)
 > - GPS Location Capture
@@ -53,31 +65,24 @@
 >   - Transplanting
 >
 > C. Automatic Calculations
->
 > Estimated Harvest Date Formula:
->
 > Harvest Date = Planting Date + Crop Maturity Period
 >
 > Examples:
-> Rice = 120 days
-> Corn = 110 days
-> Mongo = 90 days
+> - Rice = 120 days
+> - Corn = 110 days
+> - Mongo = 90 days
 >
 > Estimated Harvest Formula:
->
-> Expected Harvest (kg) =
-> Planted Area × Average Yield per Hectare
+> Expected Harvest (kg) = Planted Area × Average Yield per Hectare
 >
 > Example:
-> 2 hectares × 4,500 kg/hectare
-> = 9,000 kg estimated harvest
+> 2 hectares × 4,500 kg/hectare = 9,000 kg estimated harvest
 >
 > D. Offline Mode
->
-> Requirements:
 > - Data can be entered without internet connection.
-> - Records stored locally.
-> - Automatically sync to server when connection is restored.
+> - Records are stored locally.
+> - Records sync to the server when connectivity is restored.
 >
 > E. Submission Feature
 > - Save Draft
@@ -103,21 +108,17 @@
 > - Field Officer
 >
 > B. Data Approval Workflow
->
-> Features:
 > - View submitted reports
 > - Approve reports
 > - Reject reports
 > - Add remarks
 >
 > C. Interactive GIS Dashboard
->
 > Display:
 > - Full map of Boac Municipality
 > - All barangays
 >
 > When a barangay is clicked, display:
->
 > - Target Crop
 > - Total Planted Area
 > - Expected Total Harvest
@@ -127,46 +128,25 @@
 > - Risk Status
 >
 > D. Crop Forecasting Engine
->
 > Forecast Formula:
->
-> Expected Harvest =
-> Total Area × Average Yield
+> Expected Harvest = Total Area × Average Yield
 >
 > Supply Analysis Logic:
->
-> If Harvest > Demand
-> Status = Oversupply
->
-> If Harvest < Demand
-> Status = Shortage
->
-> If Harvest = Demand
-> Status = Balanced
+> - If Harvest > Demand → Oversupply
+> - If Harvest < Demand → Shortage
+> - If Harvest = Demand → Balanced
 >
 > E. Local Market Capacity Formula
->
-> Demand =
-> (Town Population × Per Capita Consumption) ÷ 52
+> Demand = (Town Population × Per Capita Consumption) ÷ 52
 >
 > F. Risk Monitoring
->
 > Risk Levels:
->
-> Green
-> - Demand meets supply
->
-> Yellow
-> - Potential shortage
->
-> Red
-> - Significant oversupply or shortage
+> - Green: Demand meets supply
+> - Yellow: Potential shortage
+> - Red: Significant oversupply or shortage
 >
 > G. Automated Notifications
->
-> Generate alerts:
-> - 2 to 3 weeks before harvest
->
+> Generate alerts 2–3 weeks before harvest.
 > Notification recipients:
 > - Municipal Agriculture Office
 > - Provincial Agriculture Office
@@ -179,47 +159,35 @@
 > - Risk Status
 >
 > H. Surplus Allocation Recommendation
->
-> Features:
 > - Identify neighboring municipalities
 > - Compare projected demand and supply
 > - Recommend where surplus crops can be redirected
 >
 > Example:
->
-> Boac has:
-> +5,000 kg Tomato Surplus
->
-> Gasan Demand:
-> 3,000 kg
->
-> Recommendation:
-> Transfer 3,000 kg tomato supply to Gasan Municipality.
+> Boac has +5,000 kg tomato surplus.
+> Gasan demand is 3,000 kg.
+> Recommendation: Transfer 3,000 kg of tomato supply to Gasan Municipality.
 >
 > ========================================
 > DATABASE REQUIREMENTS
 > ========================================
->
 > Tables:
->
-> Users
-> Barangays
-> Farmers
-> CropTypes
-> CropMaturityPeriods
-> FieldReports
-> Forecasts
-> HarvestSchedules
-> DemandRecords
-> Recommendations
-> Notifications
+> - Users
+> - Barangays
+> - Farmers
+> - CropTypes
+> - CropMaturityPeriods
+> - FieldReports
+> - Forecasts
+> - HarvestSchedules
+> - DemandRecords
+> - Recommendations
+> - Notifications
 >
 > ========================================
 > REPORTS
 > ========================================
->
 > Generate:
->
 > 1. Crop Production Report
 > 2. Harvest Forecast Report
 > 3. Supply vs Demand Report
@@ -234,7 +202,6 @@
 > ========================================
 > UI/UX REQUIREMENTS
 > ========================================
->
 > Design Style:
 > - Modern Government Information System
 > - Mobile Responsive
@@ -242,21 +209,19 @@
 > - Green and Agriculture Themed
 >
 > Pages:
->
-> Login
-> Dashboard
-> Map View
-> Field Reports
-> Forecasting Analytics
-> Supply Allocation Recommendations
-> Notifications
-> Reports
-> Settings
+> - Login
+> - Dashboard
+> - Map View
+> - Field Reports
+> - Forecasting Analytics
+> - Supply Allocation Recommendations
+> - Notifications
+> - Reports
+> - Settings
 >
 > ========================================
 > TECHNOLOGY STACK
 > ========================================
->
 > Frontend:
 > - React.js
 > - Tailwind CSS
@@ -283,7 +248,6 @@
 > ========================================
 > DELIVERABLES
 > ========================================
->
 > Generate:
 > 1. System Architecture Diagram
 > 2. Database ERD
@@ -296,7 +260,7 @@
 > 9. API Documentation
 > 10. Complete MVP of the Crop Supply Forecasting and Allocation System
 
-**Validation evidence recorded:** The task history reports a successful web build, API calculation tests, Flutter tests, and matching lists of 61 barangays. The retained notes do not include command output or all test filenames.
+**Validation evidence recorded:** The task history reports a successful web build, API calculation tests, Flutter tests, and verification of the 61 barangay list. The retained notes do not include all command output or complete test filenames.
 
 ### 2. Open the field app
 
@@ -316,26 +280,25 @@
 
 ### 4. Rename the product
 
-**Affected sections/files:** Visible web/mobile labels, app metadata, and documentation. Recorded examples: `frontend/src/App.jsx`, `frontend/index.html`, `mobile/web/index.html`, `mobile/web/manifest.json`, and the project README files.
+**Affected sections/files:** Visible web/mobile labels, app metadata, and documentation. Representative examples include `frontend/src/App.jsx`, `frontend/index.html`, `mobile/web/index.html`, `mobile/web/manifest.json`, and the project README files.
 
 **Exact user prompts:**
 
-> chang the agriflow into agriCast
+> change the agriflow into agriCast
 >
 > make the 'a' in the agriCast in Capital
->
 
-**Additional affected file:** `frontend/dist/assets/index-BC19QZKS.js` was edited to replace four stale compiled “AgriFlow” labels. The frontend source already displayed “AgriCast”; Node/npm were unavailable, so the generated bundle was updated directly rather than rebuilt.
+**Additional affected file:** `frontend/dist/assets/index-BC19QZKS.js` was edited to replace stale compiled “AgriFlow” labels. The frontend source already displayed “AgriCast”; Node/npm were unavailable, so the generated bundle was updated directly rather than rebuilt.
 
-**Validation evidence recorded:** A successful Flutter hot reload was reported after the mobile branding change; the browser displayed the title “AgriCast Field.” After the web bundle edit, the dashboard page was reloaded and its browser snapshot showed “AgriCast” in the navigation. A search found no remaining “AgriFlow” matches in that compiled bundle.
+**Validation evidence recorded:** A successful Flutter hot reload was reported after the mobile branding change; the browser displayed the title “AgriCast Field.” After the web bundle edit, the dashboard page was reloaded and its browser snapshot showed “AgriCast” in the navigation. A search found no remaining “AgriFlow” matches in the compiled bundle.
 
 ### 5. Fix Flutter login and web compatibility
 
-**Affected sections/files:** `mobile/lib/main.dart`, `mobile/pubspec.yaml`, `mobile/pubspec.lock`, `mobile/web/sqlite3.wasm`, `mobile/web/sqflite_sw.js`, `backend/src/server.js`, `.env.example`, `README.md`, and `mobile/README.md`. A local ignored `.env` was configured; it contains secrets and is not included here.
+**Affected sections/files:** `mobile/lib/main.dart`, `mobile/pubspec.yaml`, `mobile/pubspec.lock`, `mobile/web/sqlite3.wasm`, `mobile/web/sqflite_sw.js`, `backend/src/server.js`, `.env.example`, `README.md`, and `mobile/README.md`. A local ignored `.env` file was configured and contains secrets; it is intentionally not included here.
 
-**Exact user prompt:** `fix the issue where I cannot log in int he flutter`
+**Exact user prompt:** `fix the issue where I cannot log in in the flutter`
 
-**Validation evidence recorded:** The task history reports a healthy `/api/health` response, successful Flutter web CORS preflight, successful field-officer login and `/api/auth/me`, browser SQLite initialization, and display of the logged-in field dashboard. Flutter analysis/tests passed before the final web-SQLite and branding changes; Android APK build was not verified because the Android SDK was unavailable. The project history also reports `npm audit` with zero vulnerabilities.
+**Validation evidence recorded:** The task history reports a healthy `/api/health` response, successful Flutter web CORS preflight, successful field-officer login and `/api/auth/me`, browser SQLite initialization, and display of the logged-in field dashboard. Flutter analysis/tests passed before the final web-SQLite and branding changes. The Android APK build was not verified because the Android SDK was unavailable. The project history also reports `npm audit` with zero vulnerabilities.
 
 ### 6. Additional project status messages
 
@@ -343,7 +306,7 @@
 
 **Exact user prompt:** `it is already saved`
 
-**Validation evidence recorded:** No additional validation recorded for this message.
+**Validation evidence recorded:** No additional validation was recorded for this message.
 
 ### 7. Explain forecast formulas and analytics
 
@@ -364,10 +327,10 @@
 ## Scope notes and limitations
 
 - The retained task history describes affected files but is not a complete source-control diff or an independent authorship audit.
-- The prior contents of this file included the following additional project brief. Its provenance as a user prompt, rather than draft/generated text, is unconfirmed:
+- A previous version of this document included an additional project brief. Its provenance as a user prompt rather than draft-generated text is unconfirmed.
 
   > Act as a Senior System Architect, Full Stack Engineer, Database Architect, UI/UX Designer, GIS Specialist, and Mobile Application Developer. Design a complete enterprise-grade system called: "AgriCast: CROP SUPPLY FORECASTING AND ALLOCATION SYSTEM". Project Overview: The Crop Supply Forecasting and Allocation System is intended for the Municipal Agriculture Office of Boac, Marinduque as the pilot implementation site and must be scalable for all municipalities across Marinduque Province. The system aims to collect farm production data, forecast future crop harvests, compare supply against demand, detect oversupply and shortages, provide risk monitoring, and recommend redistribution of surplus crops among municipalities.
 
 - `docker-compose.yml` was supplied as context and inspected. Its PostgreSQL service configuration is not listed as AI-modified because the available history does not establish that the AI changed it.
 - No local `.env` contents, credentials, or generated secrets are included.
-- Reconcile this provisional disclosure with the complete conversation and project change history before submission or publication.
+- This provisional disclosure should be reconciled with the complete conversation and project change history before publication or submission.
